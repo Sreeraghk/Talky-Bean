@@ -1,4 +1,5 @@
-export type LanguageLevel = 'A1' | 'A2' | 'B1' | 'B2';
+export type LanguageLevel = 'A1' | 'A2' | 'B1' | 'B2' | 'C1';
+export type SpeakingStyle = 'Formal' | 'Casual';
 
 export interface VocabularyWord {
   id: string;
@@ -7,10 +8,69 @@ export interface VocabularyWord {
   learnedAt: number;
 }
 
+export interface GrammarTip {
+  id: string;
+  german: string;
+  explanation: string;
+  learnedAt: number;
+}
+
 export interface ProgressData {
   date: string;
   wordsLearned: number;
   speakingTimeMinutes: number;
+  exercisesCompleted?: number;
+  averageScore?: number;
+}
+
+export interface PerformanceRecord {
+  itemId: string; // ID of VocabularyWord or GrammarTip
+  type: 'vocabulary' | 'grammar';
+  successCount: number;
+  failCount: number;
+  lastAttempted: number;
+  difficultyScore: number; // 0 to 1, where 1 is hardest
+}
+
+export interface Exercise {
+  id: string;
+  type: 'vocabulary' | 'grammar';
+  question: string;
+  options: string[];
+  correctAnswerIndex: number;
+  explanation: string;
+  difficulty: number; // 0 to 1
+  relatedItemId: string;
+}
+
+export interface GrammarTopic {
+  id: string;
+  level: LanguageLevel;
+  name: string;
+  isCompleted: boolean;
+  category: 'Major' | 'MixMatch' | 'FinalIntegration';
+}
+
+export interface GrammarExercise {
+  id: string;
+  topicId: string;
+  type: 'fill-in-the-blank' | 'mix-and-match';
+  content: {
+    sentence?: string; // "Ich [blank] heute [blank]."
+    wordBank?: string[]; // ["gehe", "nach Hause"]
+    correctAnswers?: string[]; // ["gehe", "nach Hause"]
+    pairs?: { id: string; left: string; right: string }[]; // For mix-and-match
+  };
+  explanation: string;
+  isCompleted: boolean;
+  score?: number;
+}
+
+export interface GrammarBatch {
+  id: string;
+  topicId: string;
+  exercises: GrammarExercise[];
+  createdAt: number;
 }
 
 export interface Message {
@@ -32,47 +92,23 @@ export interface RolePlayScenario {
   context: string;
 }
 
-export const ROLE_PLAY_SCENARIOS: RolePlayScenario[] = [
-  {
-    id: 'doctor-doctor',
-    title: 'Doctor to Doctor',
-    description: 'Discussing a patient case in a hospital.',
-    context: 'You are a senior doctor discussing a patient case with a junior doctor in a hospital.'
-  },
-  {
-    id: 'senior-junior-doctor',
-    title: 'Senior to Junior Doctor',
-    description: 'Mentoring a junior doctor on hospital protocols.',
-    context: 'You are a senior doctor mentoring a junior doctor on hospital protocols and patient care.'
-  },
-  {
-    id: 'girlfriend-boyfriend',
-    title: 'Girlfriend to Boyfriend',
-    description: 'Planning a weekend trip together.',
-    context: 'You are talking to your partner about planning a weekend trip to the mountains.'
-  },
-  {
-    id: 'husband-wife',
-    title: 'Husband to Wife',
-    description: 'Discussing household chores and dinner plans.',
-    context: 'You are discussing household chores and deciding what to cook for dinner.'
-  },
-  {
-    id: 'business-client',
-    title: 'Business Owner to Client',
-    description: 'Negotiating a project timeline and budget.',
-    context: 'You are a business owner negotiating a project timeline and budget with a potential client.'
-  },
-  {
-    id: 'grammar-practice',
-    title: 'Grammar Practice',
-    description: 'Focus on specific German grammar rules and structures.',
-    context: 'You are a German teacher helping a student practice specific grammar rules. Focus on correcting their mistakes and explaining the rules clearly.'
-  },
-  {
-    id: 'daily-quiz',
-    title: 'Daily Quiz',
-    description: 'Test your knowledge with a quick daily challenge.',
-    context: 'You are a quiz master. Ask the user 5 questions in German about common topics and provide feedback on their answers.'
-  }
-];
+export interface ListeningQuestion {
+  id: string;
+  question: string;
+  options: string[];
+  correctAnswerIndex: number;
+  userAnswerIndex?: number;
+}
+
+export interface ListeningModule {
+  id: string;
+  level: LanguageLevel;
+  title: string;
+  script: string;
+  audioData?: string; // Base64 audio data
+  questions: ListeningQuestion[];
+  isCompleted: boolean;
+  score?: number;
+  createdAt: number;
+  unlockedAt?: number;
+}

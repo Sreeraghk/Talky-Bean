@@ -13,6 +13,7 @@ interface UseGeminiLiveProps {
   onAudioData: (data: string) => void;
   onInterrupted: () => void;
   onNewWordLearned: (german: string, english: string) => void;
+  onGrammarTip: (german: string, explanation: string) => void;
 }
 
 export function useGeminiLive({
@@ -25,7 +26,8 @@ export function useGeminiLive({
   onTranscriptUpdate,
   onAudioData,
   onInterrupted,
-  onNewWordLearned
+  onNewWordLearned,
+  onGrammarTip
 }: UseGeminiLiveProps) {
   const [isConnected, setIsConnected] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -39,7 +41,8 @@ export function useGeminiLive({
     onTranscriptUpdate,
     onAudioData,
     onInterrupted,
-    onNewWordLearned
+    onNewWordLearned,
+    onGrammarTip
   });
 
   useEffect(() => {
@@ -47,9 +50,10 @@ export function useGeminiLive({
       onTranscriptUpdate,
       onAudioData,
       onInterrupted,
-      onNewWordLearned
+      onNewWordLearned,
+      onGrammarTip
     };
-  }, [onTranscriptUpdate, onAudioData, onInterrupted, onNewWordLearned]);
+  }, [onTranscriptUpdate, onAudioData, onInterrupted, onNewWordLearned, onGrammarTip]);
 
   // Handle mid-session toggle
   useEffect(() => {
@@ -97,7 +101,7 @@ export function useGeminiLive({
           3. If the user struggles, offer gentle help or switch to English briefly to explain, then return to German.
           4. The user has previously learned these words: ${vocabulary.join(', ')}. Use them naturally in context.
           ${history && history.length > 0 ? `Previous conversation: ${history.slice(-10).map(m => `${m.sender === 'user' ? 'User' : 'AI'}: ${m.text}`).join('\n')}. Continue naturally from here.` : ""}
-          ${showGrammarExplanations ? "Occasionally provide a brief, friendly grammar tip in English if you notice a mistake, but keep it very conversational." : ""}
+          ${showGrammarExplanations ? "Occasionally provide a brief, friendly grammar tip in English if you notice a mistake. Provide it in the format [GRAMMAR_TIP: german_example - explanation_in_english]." : ""}
           Identify new words the user might have learned and provide them in the format [LEARNED_WORD: german - english].`,
           outputAudioTranscription: {},
           inputAudioTranscription: {}, 
@@ -109,7 +113,7 @@ export function useGeminiLive({
             startAudioCapture();
           },
           onmessage: async (message: LiveServerMessage) => {
-            console.log("Live Message Received:", JSON.stringify(message));
+            console.log("Live Message Received:", message);
             try {
               const serverContent = message.serverContent;
               if (!serverContent) return;
@@ -125,16 +129,20 @@ export function useGeminiLive({
                     // Fallback: If outputTranscription is missing, use modelTurn text
                     if (!serverContent.outputTranscription && part.text) {
                       console.log("AI ModelTurn Text Received (Fallback):", part.text);
-                      const cleanText = part.text.replace(/\[LEARNED_WORD:.*?\]/g, '').trim();
+                      const cleanText = part.text.replace(/\[(LEARNED_WORD|GRAMMAR_TIP):.*?\]/g, '').trim();
                       if (cleanText) {
                         callbacksRef.current.onTranscriptUpdate(cleanText, false);
                       }
                     }
-                    // Always check for learned words
+                    // Always check for learned words and grammar tips
                     if (part.text) {
                       const learnedWordMatch = part.text.match(/\[LEARNED_WORD: (.*?) - (.*?)\]/);
                       if (learnedWordMatch) {
                         callbacksRef.current.onNewWordLearned(learnedWordMatch[1], learnedWordMatch[2]);
+                      }
+                      const grammarTipMatch = part.text.match(/\[GRAMMAR_TIP: (.*?) - (.*?)\]/);
+                      if (grammarTipMatch) {
+                        callbacksRef.current.onGrammarTip(grammarTipMatch[1], grammarTipMatch[2]);
                       }
                     }
                   }
@@ -146,8 +154,8 @@ export function useGeminiLive({
                 const text = serverContent.outputTranscription.text;
                 if (text) {
                   console.log("AI Transcription Received:", text);
-                  // Clean up learned word tags from display text
-                  const cleanText = text.replace(/\[LEARNED_WORD:.*?\]/g, '').trim();
+                  // Clean up learned word and grammar tip tags from display text
+                  const cleanText = text.replace(/\[(LEARNED_WORD|GRAMMAR_TIP):.*?\]/g, '').trim();
                   if (cleanText) {
                     callbacksRef.current.onTranscriptUpdate(cleanText, false);
                   }

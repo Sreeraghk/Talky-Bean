@@ -1,5 +1,5 @@
 {
-  "name": "DeutschBuddy",
-  "description": "A German language learning app with AI-powered speaking practice, role-play, and personalized vocabulary tracking.",
-  "requestFramePermissions": ["microphone"]
+  "name": "LANG EASY",
+  "description": "A language learning app with AI-powered speaking practice, role-play, and personalized vocabulary tracking.",
+  "requestFramePermissions": ["microphone", "screen-wake-lock"]
 }
