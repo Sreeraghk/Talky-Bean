@@ -1,30 +1,52 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Mic, Book, LayoutDashboard, Settings, User, Plus, Sparkles, X, Languages, Volume2, Info, Activity, ChevronRight } from 'lucide-react';
+import { Mic, Book, LayoutDashboard, Settings, User, Plus, Sparkles, X, Languages, Volume2, Info, Activity, ChevronRight, Sun, Moon } from 'lucide-react';
 import { SpeakingInterface } from './components/SpeakingInterface';
 import { LearningLibrary } from './components/VocabularyLibrary';
 import { ProgressMeter } from './components/ProgressMeter';
 import { RolePlaySelector } from './components/RolePlaySelector';
+import { NativeFluencyMirror } from './components/NativeFluencyMirror';
 import { ListeningInterface } from './components/ListeningInterface';
 import { AdaptiveExercise } from './components/AdaptiveExercise';
 import { GrammarInterface } from './components/GrammarInterface';
+import { ProfileSection } from './components/ProfileSection';
 import { ListeningService } from './services/ListeningService';
+import { FluencyService } from './services/FluencyService';
+import { ThemeService, AppTheme } from './services/ThemeService';
 import { LanguageLevel, VocabularyWord, ProgressData, RolePlayScenario, Message, ConversationHistory, GrammarTip, SpeakingStyle } from './types';
 import { cn } from './lib/utils';
 import { Save, UserCircle, Play } from 'lucide-react';
 import { voiceService } from './services/VoiceService';
-import { SUPPORTED_LANGUAGES, GREETINGS } from './constants';
+import { SUPPORTED_LANGUAGES, GREETINGS } from './config/languages';
 import { getLanguageContent } from './data';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'dashboard' | 'library' | 'roleplay'>('dashboard');
+  const [activeTab, setActiveTab] = useState<'dashboard' | 'library' | 'roleplay' | 'profile'>('dashboard');
+  const [theme, setThemeState] = useState<AppTheme>(ThemeService.getTheme());
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [isListeningOpen, setIsListeningOpen] = useState(false);
   const [isExerciseOpen, setIsExerciseOpen] = useState(false);
   const [isGrammarOpen, setIsGrammarOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isLanguageSelectorOpen, setIsLanguageSelectorOpen] = useState(false);
+  const [isLevelSelectorOpen, setIsLevelSelectorOpen] = useState(false);
+  const [isGlitching, setIsGlitching] = useState(false);
   const [currentLanguage, setCurrentLanguage] = useState('de');
+  const [error, setError] = useState<string | null>(null);
   const [selectedScenario, setSelectedScenario] = useState<RolePlayScenario | null>(null);
+
+  useEffect(() => {
+    ThemeService.init();
+    
+    const handleThemeEvent = () => {
+      const next = ThemeService.getTheme();
+      setThemeState(next);
+      setIsGlitching(true);
+      setTimeout(() => setIsGlitching(false), 300);
+    };
+    window.addEventListener('theme-changed', handleThemeEvent);
+    return () => window.removeEventListener('theme-changed', handleThemeEvent);
+  }, []);
 
   const languageContent = getLanguageContent(currentLanguage);
   const rolePlayScenarios = languageContent.rolePlayScenarios;
@@ -114,6 +136,63 @@ export default function App() {
     return saved ? JSON.parse(saved) : [];
   });
 
+  // Migration effect for legacy data
+  useEffect(() => {
+    let changed = false;
+    const migratedVocab = vocabulary.map(w => {
+      const legacy = w as any;
+      if (!w.word && legacy.german) {
+        changed = true;
+        return { ...w, word: legacy.german, translation: legacy.english || '' };
+      }
+      return w;
+    });
+
+    const migratedGrammar = grammarTips.map(t => {
+      const legacy = t as any;
+      if (!t.rule && legacy.german) {
+        changed = true;
+        return { ...t, rule: legacy.german, explanation: legacy.english || '' };
+      }
+      return t;
+    });
+
+    if (changed) {
+      setVocabulary(migratedVocab);
+      setGrammarTips(migratedGrammar);
+    }
+  }, []);
+
+  useEffect(() => {
+    // One-time clear of old vocabulary as requested
+    const hasClearedVocab = localStorage.getItem('deutschbuddy_vocab_cleared_v1');
+    if (!hasClearedVocab) {
+      setVocabulary([]);
+      localStorage.setItem('deutschbuddy_vocab_cleared_v1', 'true');
+    }
+
+    // One-time reset of fluency mirror as requested (due to AI echo bug)
+    const hasResetFluency = localStorage.getItem('fluency_mirror_reset_v1');
+    if (!hasResetFluency) {
+      FluencyService.resetAssessment();
+      localStorage.setItem('fluency_mirror_reset_v1', 'true');
+    }
+  }, []);
+
+  useEffect(() => {
+    // One-time microphone permission request on first run
+    const initPermissions = async () => {
+      const hasAsked = localStorage.getItem('mic_permission_asked_v1');
+      if (!hasAsked) {
+        const granted = await voiceService.requestPermissions();
+        if (granted) {
+          localStorage.setItem('mic_permission_asked_v1', 'true');
+        }
+      }
+    };
+    initPermissions();
+  }, []);
+
   const [history, setHistory] = useState<ConversationHistory>(() => {
     const saved = localStorage.getItem('deutschbuddy_history');
     return saved ? JSON.parse(saved) : {};
@@ -163,22 +242,6 @@ export default function App() {
     }
   }, [customScenario]);
 
-  const handleNewWord = (word: VocabularyWord) => {
-    setVocabulary(prev => {
-      if (prev.some(w => w.german.toLowerCase() === word.german.toLowerCase())) return prev;
-      return [...prev, word];
-    });
-    
-    updateProgress(1, 0);
-  };
-
-  const handleNewGrammarTip = (tip: GrammarTip) => {
-    setGrammarTips(prev => {
-      if (prev.some(t => t.german.toLowerCase() === tip.german.toLowerCase())) return prev;
-      return [...prev, tip];
-    });
-  };
-
   const handleRemoveWord = (id: string) => {
     setVocabulary(prev => prev.filter(w => w.id !== id));
   };
@@ -216,6 +279,27 @@ export default function App() {
     });
   };
 
+  const handleNewWord = async (word: Omit<VocabularyWord, 'languageCode' | 'theme'>) => {
+    // Check if word already exists
+    const exists = vocabulary.some(w => (w.word || '').toLowerCase() === (word.word || '').toLowerCase() && w.languageCode === currentLanguage);
+    if (exists) return;
+
+    setVocabulary(prev => {
+      // Re-check just in case
+      if (prev.some(w => (w.word || '').toLowerCase() === (word.word || '').toLowerCase() && w.languageCode === currentLanguage)) return prev;
+      return [...prev, { ...word, languageCode: currentLanguage }];
+    });
+    
+    updateProgress(1, 0);
+  };
+
+  const handleNewGrammarTip = (tip: Omit<GrammarTip, 'languageCode'>) => {
+    setGrammarTips(prev => {
+      if (prev.some(t => (t.rule || '').toLowerCase() === (tip.rule || '').toLowerCase() && t.languageCode === currentLanguage)) return prev;
+      return [...prev, { ...tip, languageCode: currentLanguage }];
+    });
+  };
+
   const handleStartSpeaking = (scenario?: RolePlayScenario) => {
     setSelectedScenario(scenario || {
       id: 'free-talk',
@@ -242,7 +326,7 @@ export default function App() {
         setIsGrammarOpen(true);
         break;
       case 'Vocabulary':
-        setIsExerciseOpen(true);
+        setActiveTab('library');
         break;
       case 'Listening':
         setIsListeningOpen(true);
@@ -253,36 +337,46 @@ export default function App() {
     }
   };
 
+  const handleToggleTheme = () => {
+    ThemeService.toggleTheme();
+  };
+
   return (
-    <div className="min-h-screen bg-black text-white font-sans selection:bg-orange-500/30">
+    <div className={cn(
+      "min-h-screen bg-app-bg text-text-main font-sans selection:bg-accent/30 transition-colors duration-300 relative overflow-hidden",
+      isGlitching && "glitch-effect"
+    )}>
+      {theme === 'midnight-neon' && <div className="floor-grid" />}
+      {theme === 'y2k-kawaii' && <div className="holographic-overlay" />}
       {/* Sidebar / Navigation */}
-      <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-zinc-900/80 backdrop-blur-2xl border border-white/5 rounded-full px-6 py-3 flex items-center gap-8 shadow-2xl">
+      <nav className="fixed bottom-6 left-1/2 -translate-x-1/2 z-40 bg-card-bg/80 backdrop-blur-2xl border border-app-border rounded-full px-6 py-3 flex items-center gap-8 shadow-app">
         <button 
           onClick={() => setActiveTab('dashboard')}
-          className={cn("p-2 transition-all", activeTab === 'dashboard' ? "text-orange-500 scale-110" : "text-gray-500 hover:text-white")}
+          className={cn("p-2 transition-all", activeTab === 'dashboard' ? "text-accent scale-110" : "text-text-muted hover:text-text-main")}
         >
           <LayoutDashboard size={24} />
         </button>
         <button 
           onClick={() => setActiveTab('roleplay')}
-          className={cn("p-2 transition-all", activeTab === 'roleplay' ? "text-orange-500 scale-110" : "text-gray-500 hover:text-white")}
+          className={cn("p-2 transition-all", activeTab === 'roleplay' ? "text-accent scale-110" : "text-text-muted hover:text-text-main")}
         >
           <Sparkles size={24} />
         </button>
         <button 
           onClick={() => handleStartSpeaking()}
-          className="bg-orange-500 p-4 rounded-full -mt-12 shadow-xl shadow-orange-500/20 hover:scale-110 active:scale-95 transition-all"
+          className="bg-accent p-4 rounded-full -mt-12 shadow-xl shadow-accent/20 hover:scale-110 active:scale-95 transition-all"
         >
           <Mic size={28} className="text-white" />
         </button>
         <button 
           onClick={() => setActiveTab('library')}
-          className={cn("p-2 transition-all", activeTab === 'library' ? "text-orange-500 scale-110" : "text-gray-500 hover:text-white")}
+          className={cn("p-2 transition-all", activeTab === 'library' ? "text-accent scale-110" : "text-text-muted hover:text-text-main")}
         >
           <Book size={24} />
         </button>
         <button 
-          className="p-2 text-gray-500 hover:text-white transition-all"
+          onClick={() => setActiveTab('profile')}
+          className={cn("p-2 transition-all", activeTab === 'profile' ? "text-accent scale-110" : "text-text-muted hover:text-text-main")}
         >
           <User size={24} />
         </button>
@@ -291,48 +385,54 @@ export default function App() {
       <main className="max-w-5xl mx-auto pt-16 pb-32 px-6">
         <header className="flex flex-col md:flex-row justify-between items-start md:items-center mb-16 gap-6">
           <div className="space-y-1">
-            <div className="flex items-center gap-2 text-orange-500 mb-1">
-              <Activity size={16} />
-              <span className="text-xs font-black uppercase tracking-[0.3em] text-orange-500/80">LANG EASY</span>
-            </div>
-            <h1 className="text-5xl font-black text-white tracking-tighter leading-none">
-              {GREETINGS[currentLanguage] || 'Hello'}, Sreeragh!
+            <h1 className="text-6xl md:text-7xl font-bold tracking-tighter text-accent leading-none">
+              Lang Easy
             </h1>
-            <p className="text-zinc-500 text-sm font-medium">Just don't Quit</p>
+            <div className="flex flex-col">
+              <span className="text-xl font-bold text-text-muted tracking-tight">
+                {GREETINGS[currentLanguage] || 'Hello'}, Sreeragh!
+              </span>
+              <p className="text-text-muted/60 text-[10px] font-black uppercase tracking-[0.4em] mt-1">Just don't Quit</p>
+            </div>
           </div>
           
-          <div className="flex items-center gap-2 bg-zinc-900/40 backdrop-blur-md p-1.5 rounded-2xl border border-white/5 shadow-xl">
-            <div className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
-              <span className="text-sm">{SUPPORTED_LANGUAGES.find(l => l.code === currentLanguage)?.flag}</span>
-              <select 
-                value={currentLanguage}
-                onChange={(e) => setCurrentLanguage(e.target.value)}
-                className="bg-transparent text-white text-xs font-bold uppercase tracking-widest outline-none border-none cursor-pointer appearance-none pr-2"
-              >
-                {SUPPORTED_LANGUAGES.map(lang => (
-                  <option key={lang.code} value={lang.code}>
-                    {lang.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div className="flex items-center gap-2 px-4 py-2 bg-white/5 rounded-xl border border-white/5">
-              <Languages size={14} className="text-orange-500" />
-              <select 
-                value={level}
-                onChange={(e) => setLevel(e.target.value as LanguageLevel)}
-                className="bg-transparent text-white text-xs font-bold uppercase tracking-widest outline-none border-none cursor-pointer appearance-none pr-2"
-              >
-                <option value="A1">Level A1</option>
-                <option value="A2">Level A2</option>
-                <option value="B1">Level B1</option>
-                <option value="B2">Level B2</option>
-                <option value="C1">Level C1</option>
-              </select>
-            </div>
+          <div className="flex flex-wrap items-center gap-2 bg-card-bg/40 backdrop-blur-md p-1.5 rounded-2xl border border-app-border shadow-app w-full md:w-auto justify-center md:justify-start">
+            <button 
+              onClick={() => setIsLanguageSelectorOpen(true)}
+              className="flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 bg-card-soft rounded-xl border border-app-border hover:bg-card-bg transition-all group hover:shadow-sm shrink-0"
+            >
+              <span className="text-base">{SUPPORTED_LANGUAGES.find(l => l.code === currentLanguage)?.flag}</span>
+              <span className="text-text-main text-[10px] font-black uppercase tracking-[0.2em]">
+                {SUPPORTED_LANGUAGES.find(l => l.code === currentLanguage)?.name}
+              </span>
+              <ChevronRight size={12} className="text-text-muted group-hover:text-accent group-hover:translate-x-0.5 transition-all rotate-90" />
+            </button>
+
+            <button 
+              onClick={() => setIsLevelSelectorOpen(true)}
+              className="flex items-center gap-2 px-3 py-1.5 md:px-4 md:py-2 bg-card-soft rounded-xl border border-app-border hover:bg-card-bg transition-all group hover:shadow-sm shrink-0"
+            >
+              <div className="w-5 h-5 bg-accent/10 rounded-lg flex items-center justify-center">
+                <Languages size={12} className="text-accent" />
+              </div>
+              <span className="text-text-main text-[10px] font-black uppercase tracking-[0.2em] level-number">
+                Level {level}
+              </span>
+              <ChevronRight size={12} className="text-text-muted group-hover:text-accent group-hover:translate-x-0.5 transition-all rotate-90" />
+            </button>
+
+            <div className="hidden sm:block w-px h-6 bg-app-border mx-1" />
+
+            <button 
+              onClick={handleToggleTheme}
+              className="p-3 hover:bg-card-soft rounded-xl transition-all text-text-muted hover:text-text-main"
+              title={`Switch to ${theme === 'light' ? 'dark' : 'light'} theme`}
+            >
+              {theme === 'light' ? <Moon size={20} /> : <Sun size={20} />}
+            </button>
             <button 
               onClick={() => setIsSettingsOpen(true)}
-              className="p-3 hover:bg-white/5 rounded-xl transition-all text-zinc-400 hover:text-white"
+              className="p-3 hover:bg-card-soft rounded-xl transition-all text-text-muted hover:text-text-main"
             >
               <Settings size={20} />
             </button>
@@ -350,50 +450,53 @@ export default function App() {
             >
               <div className="space-y-8">
                 {/* Progress & Stats */}
-                <ProgressMeter data={progress} />
+                <div className="grid grid-cols-1 gap-8">
+                  <NativeFluencyMirror />
+                  <ProgressMeter data={progress} />
+                </div>
                 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-8 flex flex-col justify-between shadow-2xl relative overflow-hidden group">
+                  <div className="bg-card-bg border border-app-border rounded-card p-8 flex flex-col justify-between shadow-app relative overflow-hidden group">
                     <div className="absolute -right-8 -top-8 opacity-10 group-hover:opacity-20 transition-opacity">
-                      <Sparkles size={160} className="text-orange-500" />
+                      <Sparkles size={160} className="text-accent" />
                     </div>
                     <div className="relative z-10">
-                      <div className="w-12 h-12 bg-orange-500 rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-orange-500/20">
+                      <div className="w-12 h-12 bg-accent rounded-2xl flex items-center justify-center text-white mb-6 shadow-lg shadow-accent/20">
                         <Mic size={24} />
                       </div>
-                      <h3 className="text-2xl font-black text-white leading-tight mb-3 tracking-tight">Ready for a<br />new challenge?</h3>
-                      <p className="text-zinc-500 text-sm leading-relaxed mb-8">Your Buddy is waiting for a chat. Try a role play scenario today!</p>
+                      <h3 className="text-2xl font-black text-text-main leading-tight mb-3 tracking-tight">Ready for a<br />new challenge?</h3>
+                      <p className="text-text-muted text-sm leading-relaxed mb-8">Your Buddy is waiting for a chat. Try a role play scenario today!</p>
                     </div>
                     <button 
                       onClick={() => setActiveTab('roleplay')}
-                      className="relative z-10 w-full bg-white text-black font-black text-xs uppercase tracking-widest py-4 rounded-2xl hover:bg-orange-500 hover:text-white transition-all flex items-center justify-center gap-2 group/btn"
+                      className="relative z-10 w-full bg-accent text-white font-black text-xs uppercase tracking-widest py-4 rounded-btn hover:scale-[1.02] transition-all flex items-center justify-center gap-2 group/btn shadow-lg shadow-accent/20"
                     >
                       Start Role Play 
                       <ChevronRight size={16} className="group-hover/btn:translate-x-1 transition-transform" />
                     </button>
                   </div>
 
-                  <div className="bg-zinc-900/30 border border-white/5 rounded-3xl p-8 space-y-6">
+                  <div className="bg-card-bg border border-app-border rounded-card p-8 space-y-6 shadow-app">
                     <div className="flex items-center justify-between">
-                      <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-500">Deep Dive</h3>
-                      <div className="w-2 h-2 rounded-full bg-orange-500 animate-pulse" />
+                      <h3 className="text-[10px] font-black uppercase tracking-[0.2em] text-text-muted">Deep Dive</h3>
+                      <div className="w-2 h-2 rounded-full bg-accent animate-pulse" />
                     </div>
-                    <div className="grid grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                       {[
-                        { label: 'Grammar', icon: <Sparkles size={18} />, color: 'text-blue-400', bg: 'bg-blue-400/10', action: 'Grammar Check' },
-                        { label: 'Vocab', icon: <Book size={18} />, color: 'text-purple-400', bg: 'bg-purple-400/10', action: 'Vocabulary' },
-                        { label: 'Listening', icon: <Volume2 size={18} />, color: 'text-green-400', bg: 'bg-green-400/10', action: 'Listening' },
-                        { label: 'Settings', icon: <Settings size={18} />, color: 'text-zinc-400', bg: 'bg-zinc-400/10', action: 'Settings' },
+                        { label: 'Grammar', icon: <Sparkles size={18} />, color: 'text-accent', bg: 'bg-accent/10', action: 'Grammar Check' },
+                        { label: 'Vocab', icon: <Book size={18} />, action: 'Vocabulary' },
+                        { label: 'Listening', icon: <Volume2 size={18} />, action: 'Listening' },
+                        { label: 'Settings', icon: <Settings size={18} />, action: 'Settings' },
                       ].map((action, i) => (
                         <button 
                           key={i} 
                           onClick={() => handleQuickAction(action.action)}
-                          className="group bg-white/5 p-4 rounded-2xl border border-white/5 hover:border-orange-500/30 hover:bg-white/10 transition-all flex flex-col items-center gap-3 text-center"
+                          className="group bg-card-soft p-4 rounded-2xl border border-app-border hover:border-accent/30 hover:bg-card-bg transition-all flex flex-col items-center gap-3 text-center"
                         >
                           <div className={cn("p-3 rounded-xl transition-transform group-hover:scale-110", action.bg, action.color)}>
                             {action.icon}
                           </div>
-                          <span className="text-[10px] font-black uppercase tracking-wider text-zinc-400 group-hover:text-white transition-colors">{action.label}</span>
+                          <span className="text-[10px] font-black uppercase tracking-wider text-text-muted group-hover:text-text-main transition-colors">{action.label}</span>
                         </button>
                       ))}
                     </div>
@@ -415,6 +518,7 @@ export default function App() {
                 grammarTips={grammarTips}
                 onRemoveWord={handleRemoveWord}
                 onRemoveGrammarTip={handleRemoveGrammarTip}
+                currentLanguage={currentLanguage}
               />
             </motion.div>
           )}
@@ -435,6 +539,17 @@ export default function App() {
               />
             </motion.div>
           )}
+
+          {activeTab === 'profile' && (
+            <motion.div 
+              key="profile"
+              initial={{ opacity: 0, x: -20 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: 20 }}
+            >
+              <ProfileSection />
+            </motion.div>
+          )}
         </AnimatePresence>
       </main>
 
@@ -442,10 +557,11 @@ export default function App() {
         {isSpeaking && selectedScenario && (
           <SpeakingInterface 
             level={level}
+            languageCode={currentLanguage}
             speakingStyle={speakingStyle}
             context={selectedScenario.context}
             scenarioId={selectedScenario.id}
-            initialMessages={history[selectedScenario.id] || []}
+            initialMessages={[]} // Always start fresh as requested
             vocabulary={vocabulary}
             onClose={handleCloseSpeaking}
             onNewWord={handleNewWord}
@@ -476,6 +592,7 @@ export default function App() {
         {isExerciseOpen && (
           <AdaptiveExercise 
             level={level}
+            language={currentLanguage}
             vocabulary={vocabulary}
             grammarTips={grammarTips}
             onClose={() => setIsExerciseOpen(false)}
@@ -491,6 +608,7 @@ export default function App() {
             language={currentLanguage}
             onClose={() => setIsGrammarOpen(false)}
             onProgressUpdate={(score) => updateProgress(0, 0, 1, score)}
+            onNewWord={handleNewWord}
           />
         )}
       </AnimatePresence>
@@ -503,26 +621,26 @@ export default function App() {
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
               onClick={() => setIsSettingsOpen(false)}
-              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+              className="absolute inset-0 bg-card-bg/60 backdrop-blur-sm"
             />
             <motion.div 
               initial={{ opacity: 0, scale: 0.9, y: 20 }}
               animate={{ opacity: 1, scale: 1, y: 0 }}
               exit={{ opacity: 0, scale: 0.9, y: 20 }}
-              className="bg-zinc-900 border border-white/10 w-full max-w-md rounded-3xl overflow-hidden shadow-2xl relative z-10"
+              className="bg-card-bg border border-app-border w-full max-w-md rounded-card overflow-hidden shadow-app relative z-10"
             >
-              <div className="p-6 border-b border-white/5 flex items-center justify-between">
-                <h3 className="text-xl font-bold">App Settings</h3>
+              <div className="p-6 border-b border-app-border flex items-center justify-between">
+                <h3 className="text-xl font-bold text-text-main">App Settings</h3>
                 <button 
                   onClick={() => setIsSettingsOpen(false)}
-                  className="p-2 hover:bg-white/5 rounded-full transition-colors"
+                  className="p-2 hover:bg-card-soft rounded-full transition-colors text-text-muted"
                 >
                   <X size={20} />
                 </button>
               </div>
               <div className="p-6 space-y-6 max-h-[70vh] overflow-y-auto">
                 <div className="space-y-4">
-                  <div className="flex items-center gap-3 text-zinc-400">
+                  <div className="flex items-center gap-3 text-text-muted">
                     <Languages size={18} />
                     <span className="text-sm font-medium">Learning Level</span>
                   </div>
@@ -534,8 +652,8 @@ export default function App() {
                         className={cn(
                           "py-2 rounded-xl text-sm font-bold transition-all",
                           tempSettings.level === l 
-                            ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20" 
-                            : "bg-white/5 text-zinc-400 hover:bg-white/10"
+                            ? "bg-accent text-white shadow-lg shadow-accent/20" 
+                            : "bg-card-soft text-text-muted hover:bg-card-bg"
                         )}
                       >
                         {l}
@@ -545,7 +663,7 @@ export default function App() {
                 </div>
 
                 <div className="space-y-4">
-                  <div className="flex items-center gap-3 text-zinc-400">
+                  <div className="flex items-center gap-3 text-text-muted">
                     <Sparkles size={18} />
                     <span className="text-sm font-medium">Speaking Style</span>
                   </div>
@@ -557,8 +675,8 @@ export default function App() {
                         className={cn(
                           "py-3 rounded-xl text-sm font-bold transition-all flex flex-col items-center gap-1",
                           tempSettings.speakingStyle === s 
-                            ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20" 
-                            : "bg-white/5 text-zinc-400 hover:bg-white/10"
+                            ? "bg-accent text-white shadow-lg shadow-accent/20" 
+                            : "bg-card-soft text-text-muted hover:bg-card-bg"
                         )}
                       >
                         <span>{s}</span>
@@ -569,25 +687,25 @@ export default function App() {
                     ))}
                   </div>
                   {tempSettings.speakingStyle === 'Casual' && (
-                    <p className="text-[10px] text-zinc-500 italic px-2">
+                    <p className="text-[10px] text-text-muted italic px-2">
                       Casual mode uses street German, slang, and lighthearted topics. Perfect for chatting with a friend!
                     </p>
                   )}
                 </div>
 
                 <div className="space-y-4">
-                  <div className="flex items-center gap-3 text-zinc-400">
+                  <div className="flex items-center gap-3 text-text-muted">
                     <Volume2 size={18} />
                     <span className="text-sm font-medium">Microphone & Speed</span>
                   </div>
-                  <div className="bg-white/5 p-4 rounded-2xl space-y-6">
+                  <div className="bg-card-soft p-4 rounded-2xl space-y-6">
                     <div className="flex items-center justify-between">
-                      <span className="text-sm">Auto-Mic Mode</span>
+                      <span className="text-sm text-text-main">Auto-Mic Mode</span>
                       <button 
                         onClick={() => setTempSettings(prev => ({ ...prev, isAutoMode: !prev.isAutoMode }))}
                         className={cn(
                           "w-12 h-6 rounded-full transition-all flex items-center px-1",
-                          tempSettings.isAutoMode ? "bg-orange-500 justify-end" : "bg-zinc-700 justify-start"
+                          tempSettings.isAutoMode ? "bg-accent justify-end" : "bg-app-border justify-start"
                         )}
                       >
                         <div className="w-4 h-4 bg-white rounded-full shadow-sm" />
@@ -596,8 +714,8 @@ export default function App() {
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-zinc-400">Buddy's Speaking Speed</span>
-                        <span className="text-xs font-mono text-orange-500">{tempSettings.speed.toFixed(1)}x</span>
+                        <span className="text-xs text-text-muted">Buddy's Speaking Speed</span>
+                        <span className="text-xs font-mono text-accent">{tempSettings.speed.toFixed(1)}x</span>
                       </div>
                       <input 
                         type="range" 
@@ -606,30 +724,30 @@ export default function App() {
                         step="0.1" 
                         value={tempSettings.speed}
                         onChange={(e) => setTempSettings(prev => ({ ...prev, speed: parseFloat(e.target.value) }))}
-                        className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                        className="w-full h-1.5 bg-app-border rounded-lg appearance-none cursor-pointer accent-accent"
                       />
                     </div>
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-zinc-400">Auto-On Delay</span>
-                        <span className="text-xs font-mono text-orange-500">{tempSettings.autoMicOnDelay.toFixed(1)}s</span>
+                        <span className="text-xs text-text-muted">Auto-On Delay</span>
+                        <span className="text-xs font-mono text-accent">{tempSettings.autoMicOnDelay.toFixed(1)}s</span>
                       </div>
                       <input 
                         type="range" 
                         min="0.5" 
-                        max="5.0" 
+                        max="10.0" 
                         step="0.5" 
                         value={tempSettings.autoMicOnDelay}
                         onChange={(e) => setTempSettings(prev => ({ ...prev, autoMicOnDelay: parseFloat(e.target.value) }))}
-                        className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                        className="w-full h-1.5 bg-app-border rounded-lg appearance-none cursor-pointer accent-accent"
                       />
                     </div>
 
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="text-xs text-zinc-400">Auto-Off Delay</span>
-                        <span className="text-xs font-mono text-orange-500">{tempSettings.autoMicOffDelay.toFixed(1)}s</span>
+                        <span className="text-xs text-text-muted">Auto-Off Delay</span>
+                        <span className="text-xs font-mono text-accent">{tempSettings.autoMicOffDelay.toFixed(1)}s</span>
                       </div>
                       <input 
                         type="range" 
@@ -638,7 +756,7 @@ export default function App() {
                         step="0.5" 
                         value={tempSettings.autoMicOffDelay}
                         onChange={(e) => setTempSettings(prev => ({ ...prev, autoMicOffDelay: parseFloat(e.target.value) }))}
-                        className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-orange-500"
+                        className="w-full h-1.5 bg-app-border rounded-lg appearance-none cursor-pointer accent-accent"
                       />
                     </div>
 
@@ -653,17 +771,17 @@ export default function App() {
                           speakingStyle: 'Formal'
                         });
                       }}
-                      className="w-full py-2 text-[10px] font-black uppercase text-zinc-500 hover:text-zinc-300 transition-colors"
+                      className="w-full py-2 text-[10px] font-black uppercase text-text-muted hover:text-text-main transition-colors"
                     >
                       Reset to Default Settings
                     </button>
                   </div>
                 </div>
 
-                <div className="pt-4 border-t border-white/5">
+                <div className="pt-4 border-t border-app-border">
                   <button 
                     onClick={handleSaveSettings}
-                    className="w-full py-4 bg-orange-500 text-white rounded-2xl font-bold flex items-center justify-center gap-2 shadow-lg shadow-orange-500/20 hover:bg-orange-600 active:scale-[0.98] transition-all"
+                    className="w-full py-4 bg-accent text-white rounded-btn font-bold flex items-center justify-center gap-2 shadow-lg shadow-accent/20 hover:scale-[1.02] active:scale-[0.98] transition-all"
                   >
                     <Save size={18} />
                     Save Settings
@@ -681,6 +799,194 @@ export default function App() {
                 >
                   Reset All Progress
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Custom Language Selector Modal */}
+        {isLanguageSelectorOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsLanguageSelectorOpen(false)}
+              className="absolute inset-0 bg-card-bg/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-card-bg border border-app-border w-full max-w-md rounded-card overflow-hidden shadow-app relative z-10"
+            >
+              <div className="p-8 border-b border-app-border flex items-center justify-between bg-card-soft/30">
+                <div>
+                  <h3 className="text-3xl font-black text-text-main tracking-tighter">Choose Language</h3>
+                  <p className="text-text-muted text-[10px] font-black uppercase tracking-[0.2em] mt-1">Select your target language</p>
+                </div>
+                <button 
+                  onClick={() => setIsLanguageSelectorOpen(false)}
+                  className="p-3 hover:bg-card-soft rounded-2xl transition-colors text-text-muted hover:text-text-main border border-transparent hover:border-app-border"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+              <div className="p-6 grid grid-cols-1 gap-3">
+                {SUPPORTED_LANGUAGES.map((lang, index) => (
+                  <motion.button
+                    key={lang.code}
+                    initial={{ opacity: 0, x: -10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.05 }}
+                    onClick={() => {
+                      if (lang.isLocked) {
+                        setError(`${lang.name} is currently locked. We are focusing on German for now!`);
+                        return;
+                      }
+                      setCurrentLanguage(lang.code);
+                      setIsLanguageSelectorOpen(false);
+                    }}
+                    className={cn(
+                      "w-full flex items-center justify-between p-5 rounded-3xl border-2 transition-all relative overflow-hidden group",
+                      currentLanguage === lang.code 
+                        ? "bg-accent border-accent text-white shadow-lg shadow-accent/20" 
+                        : "bg-card-soft border-app-border hover:border-accent/30 hover:bg-card-bg text-text-main",
+                      lang.isLocked && "opacity-50 grayscale cursor-not-allowed"
+                    )}
+                  >
+                    {currentLanguage === lang.code && (
+                      <motion.div 
+                        layoutId="active-lang-bg"
+                        className="absolute inset-0 bg-accent"
+                      />
+                    )}
+                    <div className="flex items-center gap-5 relative z-10">
+                      <div className={cn(
+                        "w-14 h-14 rounded-2xl flex items-center justify-center text-3xl shadow-sm transition-transform group-hover:scale-110",
+                        currentLanguage === lang.code ? "bg-white/20" : "bg-card-bg"
+                      )}>
+                        {lang.flag}
+                      </div>
+                      <div className="text-left">
+                        <div className={cn(
+                          "text-lg font-black uppercase tracking-widest leading-none",
+                          currentLanguage === lang.code ? "text-white" : "text-text-main"
+                        )}>
+                          {lang.name}
+                        </div>
+                        <div className={cn(
+                          "text-[10px] font-bold uppercase tracking-widest mt-1 opacity-70",
+                          currentLanguage === lang.code ? "text-white" : "text-text-muted"
+                        )}>
+                          {lang.nativeName}
+                        </div>
+                      </div>
+                    </div>
+                    
+                    <div className="relative z-10">
+                      {lang.isLocked ? (
+                        <div className="bg-black/20 p-2 rounded-xl">
+                          <Settings size={16} className="text-white/50" />
+                        </div>
+                      ) : (
+                        <div className={cn(
+                          "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all",
+                          currentLanguage === lang.code ? "border-white bg-white" : "border-app-border"
+                        )}>
+                          {currentLanguage === lang.code && <div className="w-2 h-2 bg-accent rounded-full" />}
+                        </div>
+                      )}
+                    </div>
+                  </motion.button>
+                ))}
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {/* Custom Level Selector Modal */}
+        {isLevelSelectorOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsLevelSelectorOpen(false)}
+              className="absolute inset-0 bg-card-bg/60 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="bg-card-bg border border-app-border w-full max-w-md rounded-card overflow-hidden shadow-app relative z-10"
+            >
+              <div className="p-8 border-b border-app-border flex items-center justify-between bg-card-soft/30">
+                <div>
+                  <h3 className="text-3xl font-black text-text-main tracking-tighter">Proficiency</h3>
+                  <p className="text-text-muted text-[10px] font-black uppercase tracking-[0.2em] mt-1">Adjust your learning pace</p>
+                </div>
+                <button 
+                  onClick={() => setIsLevelSelectorOpen(false)}
+                  className="p-3 hover:bg-card-soft rounded-2xl transition-colors text-text-muted hover:text-text-main border border-transparent hover:border-app-border"
+                >
+                  <X size={24} />
+                </button>
+              </div>
+              <div className="p-6 grid grid-cols-1 gap-3">
+                {(['A1', 'A2', 'B1', 'B2', 'C1'] as LanguageLevel[]).map((l, index) => (
+                  <motion.button
+                    key={l}
+                    initial={{ opacity: 0, x: 10 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    transition={{ delay: index * 0.05 }}
+                    onClick={() => {
+                      setLevel(l);
+                      setIsLevelSelectorOpen(false);
+                    }}
+                    className={cn(
+                      "w-full flex items-center justify-between p-5 rounded-3xl border-2 transition-all relative overflow-hidden group",
+                      level === l 
+                        ? "bg-accent border-accent text-white shadow-lg shadow-accent/20" 
+                        : "bg-card-soft border-app-border hover:border-accent/30 hover:bg-card-bg text-text-main"
+                    )}
+                  >
+                    <div className="flex items-center gap-5 relative z-10">
+                      <div className={cn(
+                        "w-14 h-14 rounded-2xl flex items-center justify-center font-black text-xl shadow-sm transition-transform group-hover:scale-110 level-number",
+                        level === l ? "bg-white text-accent" : "bg-card-bg text-text-muted"
+                      )}>
+                        {l}
+                      </div>
+                      <div className="text-left">
+                        <div className={cn(
+                          "text-lg font-black uppercase tracking-widest leading-none",
+                          level === l ? "text-white" : "text-text-main"
+                        )}>
+                          Level {l}
+                        </div>
+                        <div className={cn(
+                          "text-[10px] font-bold uppercase tracking-widest mt-1 opacity-70",
+                          level === l ? "text-white" : "text-text-muted"
+                        )}>
+                          {l === 'A1' && 'Beginner'}
+                          {l === 'A2' && 'Elementary'}
+                          {l === 'B1' && 'Intermediate'}
+                          {l === 'B2' && 'Upper Intermediate'}
+                          {l === 'C1' && 'Advanced'}
+                        </div>
+                      </div>
+                    </div>
+                    <div className="relative z-10">
+                      <div className={cn(
+                        "w-6 h-6 rounded-full border-2 flex items-center justify-center transition-all",
+                        level === l ? "border-white bg-white" : "border-app-border"
+                      )}>
+                        {level === l && <div className="w-2 h-2 bg-accent rounded-full" />}
+                      </div>
+                    </div>
+                  </motion.button>
+                ))}
               </div>
             </motion.div>
           </div>

@@ -1,164 +1,172 @@
 import React, { useState } from 'react';
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, AreaChart, Area } from 'recharts';
+import { motion } from 'motion/react';
+import { 
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer
+} from 'recharts';
 import { ProgressData } from '../types';
+import { Activity, TrendingUp, Award, Book, Mic, Target } from 'lucide-react';
+import { ThemeService } from '../services/ThemeService';
 import { cn } from '../lib/utils';
-import { Clock, TrendingUp, Activity, Brain, Target } from 'lucide-react';
 
 interface ProgressMeterProps {
   data: ProgressData[];
 }
 
-type Metric = 'wordsLearned' | 'speakingTimeMinutes' | 'averageScore';
+export const ProgressMeter: React.FC<ProgressMeterProps> = ({ data }) => {
+  const [activeMetric, setActiveMetric] = useState<'wordsLearned' | 'speakingTimeMinutes' | 'averageScore'>('wordsLearned');
+  const theme = ThemeService.getTheme();
+  const isLight = theme === 'light';
+  const isMidnight = theme === 'midnight-neon';
+  const isStreet = theme === 'street-graphite';
+  const isKawaii = theme === 'y2k-kawaii';
 
-export function ProgressMeter({ data }: ProgressMeterProps) {
-  const [activeMetric, setActiveMetric] = useState<Metric>('wordsLearned');
-
-  if (!data || data.length === 0) {
-    return (
-      <div className="bg-zinc-900/40 backdrop-blur-md border border-white/5 rounded-3xl p-12 shadow-xl text-center">
-        <p className="text-gray-500">No progress data yet. Start learning!</p>
-      </div>
-    );
-  }
-
-  const today = data[data.length - 1];
-  const avgSpeakingTime = data.reduce((acc, curr) => acc + (curr.speakingTimeMinutes || 0), 0) / data.length;
-  const todaySpeakingTime = today.speakingTimeMinutes || 0;
+  const today = data[data.length - 1] || { wordsLearned: 0, speakingTimeMinutes: 0, averageScore: 0 };
   
-  const isAboveAverage = todaySpeakingTime >= avgSpeakingTime;
-
   const metrics = [
-    { id: 'wordsLearned', label: 'Vocabulary', icon: <TrendingUp size={14} />, unit: 'Words' },
-    { id: 'speakingTimeMinutes', label: 'Speaking', icon: <Clock size={14} />, unit: 'Min' },
-    { id: 'averageScore', label: 'Accuracy', icon: <Target size={14} />, unit: '%' },
+    { 
+      id: 'wordsLearned', 
+      label: 'Vocabulary', 
+      value: today.wordsLearned, 
+      icon: <Book size={16} />, 
+      color: isMidnight ? '#FF00FF' : (isStreet ? '#FF6B00' : (isKawaii ? '#FFB6C1' : '#f97316')) 
+    },
+    { 
+      id: 'speakingTimeMinutes', 
+      label: 'Speaking', 
+      value: `${Number(today.speakingTimeMinutes).toFixed(1)}m`, 
+      icon: <Mic size={16} />, 
+      color: isMidnight ? '#00FFFF' : (isStreet ? '#E0E0E0' : (isKawaii ? '#A0E7E5' : '#4ecdc4')) 
+    },
+    { 
+      id: 'averageScore', 
+      label: 'Accuracy', 
+      value: `${((today.averageScore || 0) * 100).toFixed(0)}%`, 
+      icon: <Target size={16} />, 
+      color: isMidnight ? '#39FF14' : (isStreet ? '#00FF41' : (isKawaii ? '#9370DB' : '#8e94f2')) 
+    },
   ];
 
-  const currentMetric = metrics.find(m => m.id === activeMetric)!;
-
-  const formatValue = (val: number) => {
-    if (activeMetric === 'averageScore') return `${(val * 100).toFixed(0)}%`;
-    return val.toFixed(activeMetric === 'speakingTimeMinutes' ? 1 : 0);
-  };
+  const chartData = data.map(d => ({
+    name: new Date(d.date).toLocaleDateString('en-US', { weekday: 'short' }),
+    wordsLearned: d.wordsLearned,
+    speakingTimeMinutes: d.speakingTimeMinutes,
+    averageScore: (d.averageScore || 0) * 100
+  }));
 
   return (
-    <div className="bg-zinc-900/40 backdrop-blur-md border border-white/10 rounded-3xl p-8 shadow-2xl relative overflow-hidden group">
-      <div className="absolute top-0 right-0 p-8 opacity-5 group-hover:opacity-10 transition-opacity">
-        <Activity size={120} className="text-orange-500" />
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-10 relative z-10">
-        <div className="space-y-4">
-          <div className="flex items-center gap-2 text-zinc-500 mb-1">
-            <TrendingUp size={14} className="text-orange-500" />
-            <h3 className="text-[10px] uppercase tracking-[0.2em] font-black">Daily Progress</h3>
+    <div className="bg-card-bg border border-app-border rounded-card p-6 md:p-8 shadow-app overflow-hidden relative">
+      <div className="absolute top-0 right-0 w-64 h-64 bg-accent/5 blur-3xl rounded-full -mr-32 -mt-32" />
+      
+      <div className="relative z-10">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
+          <div>
+            <div className="flex items-center gap-2 text-text-muted mb-1">
+              <Activity size={16} className="text-accent" />
+              <span className="text-[10px] font-black uppercase tracking-[0.2em]">Learning Activity</span>
+            </div>
+            <h2 className="text-3xl font-black text-text-main tracking-tight">Your Progress</h2>
           </div>
-          
-          <div className="flex flex-wrap gap-2">
+
+          <div className="flex bg-card-soft p-1 rounded-2xl border border-app-border">
             {metrics.map((m) => (
               <button
                 key={m.id}
-                onClick={() => setActiveMetric(m.id as Metric)}
+                onClick={() => setActiveMetric(m.id as any)}
                 className={cn(
-                  "px-3 py-1.5 rounded-xl text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-2",
+                  "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all",
                   activeMetric === m.id 
-                    ? "bg-orange-500 text-white shadow-lg shadow-orange-500/20" 
-                    : "bg-white/5 text-zinc-500 hover:bg-white/10"
+                    ? "bg-accent text-white shadow-lg shadow-accent/20" 
+                    : "text-text-muted hover:text-text-main hover:bg-card-bg"
                 )}
               >
                 {m.icon}
-                {m.label}
+                <span className="hidden sm:inline">{m.label}</span>
               </button>
             ))}
           </div>
-
-          <div className="flex items-baseline gap-2 pt-2">
-            <p className="text-4xl font-black text-white tracking-tighter">
-              {formatValue(today[activeMetric] || 0)}
-            </p>
-            <span className="text-xs font-medium text-zinc-500 uppercase tracking-wider">{currentMetric.unit}</span>
-          </div>
         </div>
 
-        <div className="lg:col-span-2 grid grid-cols-2 gap-4 bg-white/5 p-4 rounded-2xl border border-white/5">
-          <div className="space-y-1">
-            <div className="flex items-center gap-2 text-zinc-500 mb-1">
-              <Clock size={14} />
-              <h3 className="text-[10px] uppercase tracking-[0.1em] font-bold">Today's Session</h3>
-            </div>
-            <p className="text-2xl font-bold text-white tracking-tight">{todaySpeakingTime.toFixed(1)}<span className="text-sm font-normal text-zinc-500 ml-1">min</span></p>
+        <div className="flex flex-col gap-8">
+          <div className="h-[300px] bg-card-soft rounded-3xl p-6 border border-app-border">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={chartData}>
+                <defs>
+                  <linearGradient id="colorMetric" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor={metrics.find(m => m.id === activeMetric)?.color} stopOpacity={0.3}/>
+                    <stop offset="95%" stopColor={metrics.find(m => m.id === activeMetric)?.color} stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke={isLight ? "rgba(0,0,0,0.05)" : "rgba(255,255,255,0.05)"} vertical={false} />
+                <XAxis 
+                  dataKey="name" 
+                  axisLine={false} 
+                  tickLine={false} 
+                  tick={{ fill: isLight ? '#52525b' : '#71717a', fontSize: 10, fontWeight: 700 }}
+                  dy={10}
+                />
+                <YAxis hide />
+                <Tooltip 
+                  contentStyle={{ 
+                    backgroundColor: isMidnight ? '#1A0B2E' : (isStreet ? '#1E1E1E' : (isKawaii ? 'rgba(255, 255, 255, 0.8)' : (isLight ? '#ffffff' : '#18181b'))), 
+                    border: isMidnight ? '1px solid #00FFFF' : (isStreet ? '2px solid #FF6B00' : (isKawaii ? '2px solid #FFB6C1' : (isLight ? '1px solid rgba(0,0,0,0.1)' : '1px solid rgba(255,255,255,0.1)'))),
+                    borderRadius: isStreet ? '0px' : (isKawaii ? '20px' : '12px'),
+                    fontSize: '12px',
+                    fontWeight: '700',
+                    color: isKawaii || isLight ? '#4B0082' : '#ffffff',
+                    boxShadow: isMidnight ? '0 0 10px #00FFFF' : (isKawaii ? '0 4px 12px rgba(255, 182, 193, 0.4)' : 'none'),
+                    backdropFilter: isKawaii ? 'blur(8px)' : 'none'
+                  }}
+                  itemStyle={{ color: isKawaii || isLight ? '#4B0082' : '#ffffff' }}
+                  formatter={(value: number) => {
+                    const metric = metrics.find(m => m.id === activeMetric);
+                    const formattedValue = activeMetric === 'wordsLearned' ? value : Number(value).toFixed(1);
+                    const suffix = activeMetric === 'speakingTimeMinutes' ? 'm' : activeMetric === 'averageScore' ? '%' : '';
+                    return [`${formattedValue}${suffix}`, metric?.label];
+                  }}
+                />
+                <Area 
+                  type="monotone" 
+                  dataKey={activeMetric} 
+                  stroke={metrics.find(m => m.id === activeMetric)?.color} 
+                  strokeWidth={4}
+                  fillOpacity={1} 
+                  fill="url(#colorMetric)" 
+                  animationDuration={1500}
+                />
+              </AreaChart>
+            </ResponsiveContainer>
           </div>
-          <div className="space-y-1 border-l border-white/10 pl-4">
-            <div className="flex items-center gap-2 text-zinc-500 mb-1">
-              <Activity size={14} />
-              <h3 className="text-[10px] uppercase tracking-[0.1em] font-bold">Daily Average</h3>
-            </div>
-            <div className="flex items-baseline gap-2">
-              <p className="text-2xl font-bold text-white tracking-tight">{avgSpeakingTime.toFixed(1)}<span className="text-sm font-normal text-zinc-500 ml-1">min</span></p>
-              <span className={cn(
-                "text-[10px] font-black px-1.5 py-0.5 rounded uppercase",
-                isAboveAverage ? "text-green-500 bg-green-500/10" : "text-orange-500 bg-orange-500/10"
-              )}>
-                {isAboveAverage ? 'Above' : 'Below'}
-              </span>
+
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {metrics.map((m) => (
+              <div 
+                key={m.id}
+                className={cn(
+                  "p-4 rounded-2xl border transition-all duration-500 flex flex-col items-center text-center",
+                  activeMetric === m.id 
+                    ? "bg-accent/10 border-accent/30 scale-[1.02]" 
+                    : "bg-card-soft border-app-border"
+                )}
+              >
+                <div className={cn("p-2 rounded-xl mb-3", activeMetric === m.id ? "bg-accent text-white" : "bg-card-bg text-text-muted")}>
+                  {m.icon}
+                </div>
+                <div className="text-xl font-black text-text-main mb-0.5 level-number">{m.value}</div>
+                <div className="text-[10px] font-black uppercase tracking-widest text-text-muted">{m.label}</div>
+              </div>
+            ))}
+
+            <div className="p-4 bg-accent rounded-2xl text-white shadow-xl shadow-accent/20 flex flex-col items-center text-center group cursor-pointer overflow-hidden relative">
+              <div className="absolute inset-0 bg-gradient-to-r from-transparent via-white/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-1000" />
+              <div className="bg-white/20 p-2 rounded-xl mb-3">
+                <Award size={18} />
+              </div>
+              <div className="text-xl font-black level-number">7 Days</div>
+              <div className="text-[10px] font-black uppercase tracking-widest opacity-80">Streak</div>
             </div>
           </div>
         </div>
-      </div>
-      
-      <div className="h-64 w-full relative z-10">
-        <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 10, right: 10, left: -20, bottom: 0 }}>
-            <defs>
-              <linearGradient id="colorMetric" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#f97316" stopOpacity={0.4}/>
-                <stop offset="95%" stopColor="#f97316" stopOpacity={0}/>
-              </linearGradient>
-            </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} strokeOpacity={0.1} />
-            <XAxis 
-              dataKey="date" 
-              stroke="#52525b" 
-              fontSize={10} 
-              tickLine={false} 
-              axisLine={false} 
-              dy={10}
-              tickFormatter={(val) => {
-                const d = new Date(val);
-                return d.toLocaleDateString([], { weekday: 'short' });
-              }}
-            />
-            <YAxis hide domain={activeMetric === 'averageScore' ? [0, 1] : ['dataMin', 'dataMax + 2']} />
-            <Tooltip 
-              cursor={{ stroke: '#f97316', strokeWidth: 2, strokeDasharray: '5 5' }}
-              content={({ active, payload, label }) => {
-                if (active && payload && payload.length) {
-                  return (
-                    <div className="bg-zinc-950 border border-white/10 p-3 rounded-2xl shadow-2xl">
-                      <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest mb-1">
-                        {new Date(label).toLocaleDateString([], { month: 'short', day: 'numeric' })}
-                      </p>
-                      <p className="text-sm font-bold text-white">
-                        {formatValue(payload[0].value)} <span className="text-xs font-normal text-zinc-500">{currentMetric.unit}</span>
-                      </p>
-                    </div>
-                  );
-                }
-                return null;
-              }}
-            />
-            <Area 
-              type="monotone" 
-              dataKey={activeMetric} 
-              stroke="#f97316" 
-              strokeWidth={4}
-              fillOpacity={1} 
-              fill="url(#colorMetric)" 
-              animationDuration={2000}
-              activeDot={{ r: 6, fill: '#f97316', stroke: '#000', strokeWidth: 2 }}
-            />
-          </AreaChart>
-        </ResponsiveContainer>
       </div>
     </div>
   );
-}
+};

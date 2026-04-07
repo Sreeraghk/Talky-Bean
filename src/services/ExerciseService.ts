@@ -2,15 +2,18 @@ import { LanguageLevel, Exercise, VocabularyWord, GrammarTip } from "../types";
 import { PerformanceService } from "./PerformanceService";
 import { AiService } from "./AiService";
 import { Type } from "@google/genai";
+import { getLanguageConfig } from "../config/languages";
 
 export class ExerciseService {
   static async generateAdaptiveExercise(
     level: LanguageLevel,
     vocabulary: VocabularyWord[],
-    grammarTips: GrammarTip[]
+    grammarTips: GrammarTip[],
+    languageCode: string
   ): Promise<Exercise> {
     const overallPerformance = PerformanceService.getOverallPerformance();
-    const history = PerformanceService.getHistory();
+    const langConfig = getLanguageConfig(languageCode);
+    const langName = langConfig.name;
     
     // Choose type based on history or random
     const type = Math.random() > 0.5 ? 'vocabulary' : 'grammar';
@@ -18,7 +21,7 @@ export class ExerciseService {
     
     if (items.length === 0) {
       // Fallback if no items learned yet
-      return this.generateGenericExercise(level, type);
+      return this.generateGenericExercise(level, type, languageCode);
     }
 
     // Select items needing practice
@@ -28,10 +31,14 @@ export class ExerciseService {
       ? candidateItems[Math.floor(Math.random() * candidateItems.length)]
       : items[Math.floor(Math.random() * items.length)];
 
-    const prompt = `Generate a German ${type} exercise for level ${level}.
+    const targetText = type === 'vocabulary' 
+      ? (targetItem as VocabularyWord).word 
+      : (targetItem as GrammarTip).rule;
+
+    const prompt = `Generate a ${langName} ${type} exercise for level ${level}.
     
     Context:
-    - Target Item: ${type === 'vocabulary' ? (targetItem as VocabularyWord).german : (targetItem as GrammarTip).german}
+    - Target Item: ${targetText}
     - User Performance: ${overallPerformance < 0.5 ? 'Struggling' : overallPerformance > 0.8 ? 'Advanced' : 'Intermediate'}
     - Difficulty Adjustment: ${overallPerformance < 0.5 ? 'Make it easier' : overallPerformance > 0.8 ? 'Make it more challenging' : 'Maintain current level'}
     
@@ -39,7 +46,7 @@ export class ExerciseService {
     
     Provide the response in JSON format with the following structure:
     {
-      "question": "The question in German",
+      "question": "The question in ${langName}",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctAnswerIndex": 0,
       "explanation": "A brief explanation of why the answer is correct and how it relates to the grammar/vocabulary rule.",
@@ -76,13 +83,16 @@ export class ExerciseService {
     };
   }
 
-  private static async generateGenericExercise(level: LanguageLevel, type: 'vocabulary' | 'grammar'): Promise<Exercise> {
-    const prompt = `Generate a generic German ${type} exercise for level ${level}.
+  private static async generateGenericExercise(level: LanguageLevel, type: 'vocabulary' | 'grammar', languageCode: string): Promise<Exercise> {
+    const langConfig = getLanguageConfig(languageCode);
+    const langName = langConfig.name;
+    
+    const prompt = `Generate a generic ${langName} ${type} exercise for level ${level}.
     The user hasn't learned any specific words yet, so choose a common topic for this level.
     
     Provide the response in JSON format with the following structure:
     {
-      "question": "The question in German",
+      "question": "The question in ${langName}",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctAnswerIndex": 0,
       "explanation": "A brief explanation.",

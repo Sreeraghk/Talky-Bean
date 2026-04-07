@@ -1,12 +1,32 @@
-import { LanguageLevel, ListeningModule } from "../types";
+import { LanguageLevel, ListeningModule, ExamType, ListeningQuestion } from "../types";
 import { AudioStorage } from "../lib/audioStorage";
-import { getLanguageContent } from "../data";
 import { AiService } from "./AiService";
 import { Modality } from "@google/genai";
+import { getLanguageConfig } from "../config/languages";
+import { SCENARIOS } from "../constants/scenarios";
+import { UserService } from "./UserService";
 
 export class ListeningService {
-  private static STORAGE_KEY = 'deutschbuddy_listening_modules';
+  private static STORAGE_KEY = 'easy_lang_listening_modules';
   private static isGenerating: Record<string, boolean> = {};
+  private static listeners: (() => void)[] = [];
+
+  static subscribe(listener: () => void) {
+    this.listeners.push(listener);
+    return () => {
+      this.listeners = this.listeners.filter(l => l !== listener);
+    };
+  }
+
+  private static notify() {
+    this.listeners.forEach(l => l());
+  }
+
+  static getActiveGenerations(level: LanguageLevel, examType: ExamType, languageCode: string): number[] {
+    return Object.keys(this.isGenerating)
+      .filter(key => key.startsWith(`${languageCode}-${level}-${examType}-`) && this.isGenerating[key])
+      .map(key => parseInt(key.split('-').pop() || '0'));
+  }
 
   private static async retry<T>(fn: () => Promise<T>, retries = 5, delay = 3000): Promise<T> {
     try {
@@ -30,22 +50,65 @@ export class ListeningService {
     }
   }
 
-  static async generateModule(level: LanguageLevel, existingTitles: string[] = []): Promise<ListeningModule> {
-    const prompt = `Generate a German listening exam module for level ${level}. 
+  static async generateModule(
+    level: LanguageLevel, 
+    examType: ExamType, 
+    languageCode: string,
+    index: number, 
+    existingTitles: string[] = []
+  ): Promise<ListeningModule> {
+    const config = getLanguageConfig(languageCode);
+    const exam = config.exams.find(e => e.id === examType) || config.exams[0];
+    const profile = UserService.getProfile();
     
-    CRITICAL: The topic must be unique and different from these existing modules: ${existingTitles.join(', ')}.
+    // Scenario Logic: 50% from list, 50% from user preference
+    let scenario = "";
+    const useUserPreference = Math.random() > 0.5 && profile?.aiAssessment;
     
-    The script should be between 30 seconds and 2 minutes long when spoken.
-    The topic should be realistic and similar to Goethe or Telc exams.
+    if (useUserPreference) {
+      scenario = `Personalized context based on user's goals: ${profile?.aiAssessment}`;
+    } else {
+      // Rotate through the 50 scenarios
+      scenario = SCENARIOS[index % SCENARIOS.length];
+    }
+    
+    const prompt = `Act as a "Speech-Optimized Text Engine." Your goal is to generate a ${config.name} listening exam script for level ${level} following the ${exam.name} exam format. 
+    
+    CRITICAL: This is for the ${exam.name} exam. 
+    
+    THEMATIC FOCUS: This script must be based on the following scenario: "${scenario}".
+    ${profile?.goals ? `USER CONTEXT: The user is learning for this reason: "${profile.goals}". Incorporate this into the script where possible.` : ''}
+    
+    The topic must be unique and different from these existing modules: ${existingTitles.join(', ')}.
+    
+    ### EXAM-SPECIFIC ARCHITECTURE:
+    ${exam.specifications}
+    
+    ### LINGUISTIC PROPERTIES TO SIMULATE:
+    1. PROSODY: Vary pitch and intonation. Use punctuation to guide the engine (e.g., "?" for rising pitch, "!" for high energy).
+    2. NATURAL PAUSING: Use "..." for brief thought pauses and "-" for sudden mid-sentence shifts in thought.
+    3. ADAPTIVE PACE: Write short, punchy sentences for excitement and longer, multi-clause sentences for complex explanations to break rhythmic monotony.
+    4. VOCAL EMBODIMENT: Include "breath words" and conversational anchors appropriate for ${config.name}.
+    5. EMOTIONAL COLORING: Match the word choice to the sentiment—use vivid, sensory language for "bright" tones and grounded, steady vocabulary for "serious" tones.
+    6. ARTICULATION: Use natural ${config.name} contractions and casual connectors to avoid the "over-enunciated" robotic feel.
+
+    ### OUTPUT FORMATTING RULES:
+    - INSERT DISFLUENCIES: Occasionally add natural fillers appropriate for ${config.name} at the start of complex sentences to simulate real-time thinking.
+    - STRESS CUES: Use ALL CAPS for words that need a "tonic stress".
+    - RHYTHM CONTROL: Avoid uniform sentence lengths. Mix them up constantly.
+    - NO META-TEXT: Do not include "Speaker:" or [Pauses]. Just provide the raw text formatted for the TTS engine.
+    
+    The script should be between 1 and 3 minutes long when spoken.
     
     Provide the response in JSON format:
     {
       "title": "A unique, descriptive title",
-      "script": "The full German script",
+      "script": "The full ${config.name} script following the Speech-Optimized rules above.",
       "questions": [
         {
-          "question": "Multiple choice question in German",
-          "options": ["Option A", "Option B", "Option C", "Option D"],
+          "question": "Question text in ${config.name}",
+          "type": "${exam.questionType}",
+          "options": ${JSON.stringify(exam.options)},
           "correctAnswerIndex": 0
         }
       ]
@@ -60,33 +123,51 @@ export class ListeningService {
 
     const data = JSON.parse(response.text);
     
+    const audioPrompt = `Speak the following ${config.name} script for a ${level} ${exam.name} listening exam. 
+    
+    CRITICAL INSTRUCTIONS FOR AUTHENTICITY:
+    1. PACE: Speak at a natural, authentic speed for a ${level} learner. Not too fast, not robotic.
+    2. PAUSES: Strictly follow the "..." and "-" markers for pauses and shifts.
+    3. INTONATION: Use expressive, human-like intonation. Pay close attention to ALL CAPS words for emphasis.
+    
+    SCRIPT:
+    ${data.script}`;
+
     const audioResponse = await this.retry(() => ai.models.generateContent({
       model: AiService.getSpeechModelName(),
-      contents: [{ parts: [{ text: data.script }] }],
+      contents: [{ parts: [{ text: audioPrompt }] }],
       config: {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
+          voiceConfig: { 
+            prebuiltVoiceConfig: { voiceName: 'Kore' } 
+          },
         },
       },
     }));
 
     const audioData = audioResponse.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-    const id = Math.random().toString(36).substr(2, 9);
-
-    if (audioData) {
-      await AudioStorage.set(id, audioData);
+    
+    if (!audioData) {
+      console.error('[ListeningService] No audio data returned from Gemini TTS. Response:', JSON.stringify(audioResponse));
+      throw new Error('Failed to generate audio for this module. Please try again.');
     }
+
+    const id = Math.random().toString(36).substr(2, 9);
+    await AudioStorage.set(id, audioData);
 
     return {
       id,
       level,
+      examType: exam.id,
       title: data.title,
+      scenario: data.scenario || scenario,
       script: data.script,
       questions: data.questions.map((q: any, i: number) => ({ ...q, id: `q-${i}` })),
       isCompleted: false,
       createdAt: Date.now(),
       unlockedAt: Date.now(),
+      index,
     };
   }
 
@@ -94,8 +175,8 @@ export class ListeningService {
     return AudioStorage.get(id);
   }
 
-  static getModules(): ListeningModule[] {
-    const saved = localStorage.getItem(this.STORAGE_KEY);
+  static getModules(languageCode: string): ListeningModule[] {
+    const saved = localStorage.getItem(`${this.STORAGE_KEY}_${languageCode}`);
     if (!saved) return [];
     try {
       return JSON.parse(saved);
@@ -104,64 +185,61 @@ export class ListeningService {
     }
   }
 
-  static saveModules(modules: ListeningModule[]) {
-    localStorage.setItem(this.STORAGE_KEY, JSON.stringify(modules));
+  static saveModules(modules: ListeningModule[], languageCode: string) {
+    localStorage.setItem(`${this.STORAGE_KEY}_${languageCode}`, JSON.stringify(modules));
+    this.notify();
   }
 
-  static async ensureInitialModules(level: LanguageLevel, language: string = 'de'): Promise<ListeningModule[]> {
-    const modules = this.getModules();
-    const levelModules = modules.filter(m => m.level === level);
-    
-    if (levelModules.length === 0) {
-      // Load starter module if available
-      const languageContent = getLanguageContent(language);
-      const starter = languageContent.starterListening[level];
-      if (starter) {
-        const initial = [starter];
-        this.saveModules([...modules, ...initial]);
-        return initial;
-      }
-    }
-    
-    return levelModules;
+  static async ensureInitialModules(level: LanguageLevel, examType: ExamType, languageCode: string): Promise<ListeningModule[]> {
+    const modules = this.getModules(languageCode);
+    return modules.filter(m => m.level === level && m.examType === examType);
   }
 
-  static canGenerateMore(level: LanguageLevel): { can: boolean; reason?: string } {
-    const modules = this.getModules().filter(m => m.level === level);
-    const unfinished = modules.filter(m => !m.isCompleted).length;
+  static canGenerateMore(level: LanguageLevel, examType: ExamType, languageCode: string): { can: boolean; reason?: string; remainingToFinish?: number } {
+    const modules = this.getModules(languageCode).filter(m => 
+      m.level === level && 
+      m.examType === examType
+    );
     
-    if (unfinished > 2) {
-      return { can: false, reason: 'Finish more modules first (max 2 unfinished allowed)' };
+    const activeGenCount = Object.keys(this.isGenerating)
+      .filter(key => key.startsWith(`${languageCode}-${level}-${examType}-`) && this.isGenerating[key])
+      .length;
+
+    const unfinished = modules.filter(m => !m.isCompleted).length + activeGenCount;
+    
+    if (unfinished >= 4) {
+      return { 
+        can: false, 
+        reason: `You can have a maximum of 4 unfinished or generating modules. Finish one to unlock more.`,
+        remainingToFinish: 1
+      };
     }
     
-    if (modules.length >= 100) {
+    if (modules.length + activeGenCount >= 100) {
       return { can: false, reason: 'Maximum modules reached' };
     }
 
     return { can: true };
   }
 
-  static async generateNextBatch(level: LanguageLevel): Promise<ListeningModule[]> {
-    const check = this.canGenerateMore(level);
+  static async generateSingleModule(level: LanguageLevel, examType: ExamType, languageCode: string, index: number): Promise<ListeningModule> {
+    const check = this.canGenerateMore(level, examType, languageCode);
     if (!check.can) throw new Error(check.reason);
     
-    if (this.isGenerating[level]) throw new Error('Generation already in progress');
-    this.isGenerating[level] = true;
+    const key = `${languageCode}-${level}-${examType}-${index}`;
+    if (this.isGenerating[key]) throw new Error('Generation already in progress');
+    this.isGenerating[key] = true;
+    this.notify();
 
     try {
-      const newModules: ListeningModule[] = [];
-      for (let i = 0; i < 5; i++) {
-        const currentModules = this.getModules();
-        const existingTitles = currentModules.filter(m => m.level === level).map(m => m.title);
-        const module = await this.generateModule(level, existingTitles);
-        newModules.push(module);
-        this.saveModules([...this.getModules(), module]);
-        // Small delay to avoid rate limits
-        await new Promise(r => setTimeout(r, 1000));
-      }
-      return newModules;
+      const currentModules = this.getModules(languageCode);
+      const existingTitles = currentModules.filter(m => m.level === level && m.examType === examType).map(m => m.title);
+      const module = await this.generateModule(level, examType, languageCode, index, existingTitles);
+      this.saveModules([...this.getModules(languageCode), module], languageCode);
+      return module;
     } finally {
-      this.isGenerating[level] = false;
+      this.isGenerating[key] = false;
+      this.notify();
     }
   }
 }

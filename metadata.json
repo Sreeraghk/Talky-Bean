@@ -1,5 +1,9 @@
 {
-  "name": "LANG EASY",
-  "description": "A language learning app with AI-powered speaking practice, role-play, and personalized vocabulary tracking.",
-  "requestFramePermissions": ["microphone", "screen-wake-lock"]
+  "name": "Lang Easy",
+  "description": "A language learning app that makes it easy to learn new languages.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
 }

@@ -9,12 +9,12 @@ export class AiService {
    * The default model used for most tasks (text generation, grammar, etc.)
    * Change this value to switch to a different model (e.g., "gemini-3.1-pro-preview").
    */
-  private static DEFAULT_MODEL = "gemini-3-flash-preview";
+  private static DEFAULT_MODEL = "models/gemini-3-flash-preview";
 
   /**
    * The model used for audio/speech generation (TTS).
    */
-  private static SPEECH_MODEL = "gemini-2.5-flash-preview-tts";
+  private static SPEECH_MODEL = "models/gemini-2.5-flash-preview-tts";
 
   /**
    * Returns a new GoogleGenAI instance with the API key from environment variables.

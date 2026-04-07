@@ -80,10 +80,10 @@ export function RolePlaySelector({ onSelect, customScenario, onSaveCustom, onDel
           <motion.div
             key={scenario.id}
             whileHover={{ scale: 1.01 }}
-            className="bg-zinc-900/50 p-6 rounded-3xl border border-white/5 text-left hover:border-orange-500/30 transition-all group relative overflow-hidden flex flex-col justify-between"
+            className="bg-card-soft p-6 rounded-3xl border border-app-border text-left hover:border-accent/30 transition-all group relative overflow-hidden flex flex-col justify-between"
           >
             <div>
-              <h3 className="text-lg font-bold text-white mb-2">{scenario.title}</h3>
+              <h3 className="text-lg font-bold text-text-main mb-2">{scenario.title}</h3>
             </div>
             
             <div className="mt-6 flex items-center justify-between">
@@ -118,8 +118,8 @@ export function RolePlaySelector({ onSelect, customScenario, onSaveCustom, onDel
             </div>
             <div>
               <div className="flex items-center gap-2 mb-2">
-                <Sparkles size={16} className="text-orange-500" />
-                <h3 className="text-lg font-bold text-white">{customScenario.title}</h3>
+                <Sparkles size={16} className="text-accent" />
+                <h3 className="text-lg font-bold text-text-main">{customScenario.title}</h3>
               </div>
             </div>
             
@@ -144,26 +144,26 @@ export function RolePlaySelector({ onSelect, customScenario, onSaveCustom, onDel
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: 20 }}
-              className="col-span-1 md:col-span-2 bg-zinc-900 border border-orange-500/30 p-6 rounded-3xl space-y-4"
+              className="col-span-1 md:col-span-2 bg-card-bg border border-accent/30 p-6 rounded-3xl space-y-4"
             >
               <div className="flex items-center justify-between">
                 <h3 className="text-lg font-bold flex items-center gap-2">
-                  <Sparkles className="text-orange-500" size={20} />
+                  <Sparkles className="text-accent" size={20} />
                   Plan Your Custom Scenario
                 </h3>
-                <button onClick={() => setIsPlanning(false)} className="text-zinc-500 hover:text-white">
+                <button onClick={() => setIsPlanning(false)} className="text-text-muted hover:text-text-main">
                   <X size={20} />
                 </button>
               </div>
-              <p className="text-xs text-zinc-400">Describe the situation, who the AI should be, and what your goal is (up to 250 words).</p>
+              <p className="text-xs text-text-subtle">Describe the situation, who the AI should be, and what your goal is (up to 250 words).</p>
               <div className="relative">
                 <textarea 
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value.slice(0, 1000))} // Roughly 250 words
                   placeholder="e.g. I am at a train station in Berlin and I lost my ticket. The AI is a helpful but strict station officer..."
-                  className="w-full bg-black/40 border border-white/10 rounded-2xl p-4 text-sm min-h-[120px] focus:border-orange-500/50 outline-none transition-all resize-none"
+                  className="w-full bg-input-bg border border-app-border rounded-2xl p-4 text-sm min-h-[120px] focus:border-accent/50 outline-none transition-all resize-none"
                 />
-                <div className="absolute bottom-3 right-3 text-[10px] text-zinc-500 font-mono">
+                <div className="absolute bottom-3 right-3 text-[10px] text-text-subtle font-mono">
                   {prompt.length}/1000
                 </div>
               </div>
@@ -171,11 +171,11 @@ export function RolePlaySelector({ onSelect, customScenario, onSaveCustom, onDel
                 <button 
                   onClick={handleGenerateScenario}
                   disabled={!prompt.trim() || isGenerating}
-                  className="px-6 py-3 bg-orange-500 text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-orange-600 transition-all"
+                  className="px-6 py-3 bg-accent text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-accent-hover transition-all"
                 >
                   {isGenerating ? (
                     <>
-                      <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                      <div className="w-4 h-4 border-2 border-white/30 border-t-text-main rounded-full animate-spin" />
                       Generating...
                     </>
                   ) : (
