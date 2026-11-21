@@ -1,0 +1,157 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.uid == 'jruhO3mtqrcBDUxJ2CuPJhs2clf1' ||
+        (request.auth.token != null && (request.auth.token.email == 'sreeraghk@gmail.com' || request.auth.token.email.lower() == 'sreeraghk@gmail.com'))
+      );
+    }
+
+    // Universal Admin full access rule across all Firestore paths
+    match /{document=**} {
+      allow read, write: if isAdmin();
+    }
+
+    // Path variable verification ID patterns
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_:\\-\\+\\.\\s]+$');
+    }
+
+    // OTP Token requests
+    match /otp_requests/{email} {
+      allow get: if true;
+      allow create, update, delete: if (
+        request.resource == null || (
+          request.resource.data.code is string && 
+          request.resource.data.code.size() == 6 &&
+          request.resource.data.email == email &&
+          request.resource.data.expiresAt is int
+        )
+      );
+    }
+
+    // Developer whitelist system for free access and token caps
+    match /dev_whitelisted_users/{email} {
+      allow get: if isSignedIn() && (
+        request.auth.token.email.lower() == email.lower() || 
+        isAdmin()
+      );
+      
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        request.auth.token.email.lower() == email.lower() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['tokenUsed', 'updatedAt']) &&
+        request.resource.data.tokenUsed is int &&
+        request.resource.data.tokenUsed >= resource.data.tokenUsed
+      );
+      allow list: if isAdmin();
+    }
+
+    // Hardware verification system to block multiple free trials
+    match /used_device_trials/{deviceId} {
+      allow get: if isValidId(deviceId) || isAdmin();
+      allow list: if isAdmin();
+      allow create, update: if (
+        isValidId(deviceId) &&
+        request.resource.data.deviceId == deviceId &&
+        request.resource.data.activatedAt is int &&
+        request.resource.data.expiresAt is int &&
+        request.resource.data.userId is string &&
+        request.resource.data.userEmail is string &&
+        request.resource.data.platform is string
+      ) || isAdmin();
+    }
+
+    // User collection path - Regular users locked down strictly to their own UID
+    // MEASURE 1: Server-Only Entitlement Writes. Client writes cannot alter subscription/entitlement fields.
+    match /users/{userId} {
+      function isOwner() {
+        return isSignedIn() && request.auth.uid == userId;
+      }
+
+      // Helper function checking if client write attempts to touch restricted subscription / entitlement / role keys
+      function touchesRestrictedKeys() {
+        return request.resource.data.diff(resource.data).affectedKeys().hasAny([
+          'subscription', 'isPro', 'plan', 'tokens', 'role', 'isDev', 
+          'devWhitelisted', 'billing', 'dodoCustomerId', 'dodoSubscriptionId', 
+          'entitlement', 'entitlements', 'paymentStatus', 'tier'
+        ]);
+      }
+
+      allow get, list, read: if isOwner() || isAdmin();
+      
+      // On creation, client cannot set pro/paid state or privileged roles
+      allow create: if (isOwner() && (
+        !request.resource.data.keys().hasAny(['isPro', 'role', 'subscription', 'dodoSubscriptionId']) ||
+        (request.resource.data.get('isPro', false) == false && request.resource.data.get('role', 'user') == 'user')
+      )) || isAdmin();
+
+      // On update, client is forbidden from altering entitlement or subscription keys
+      allow update: if (isOwner() && !touchesRestrictedKeys()) || isAdmin();
+      allow delete: if isAdmin();
+
+      // Subscription subcollections - strictly SERVER / ADMIN WRITE ONLY. Clients can only READ their subscription status.
+      match /settings/subscription {
+        allow read: if isOwner() || isAdmin();
+        allow write: if isAdmin();
+      }
+
+      match /subscriptions/{subId} {
+        allow read: if isOwner() || isAdmin();
+        allow write: if isAdmin();
+      }
+
+      // User voice speed and auto-mic delay preferences
+      match /settings/preferences {
+        allow read: if isOwner() || isAdmin();
+        allow create, update: if (
+          isOwner() &&
+          request.resource.data.keys().hasAll(['speed', 'autoMicOnDelay', 'updatedAt']) &&
+          request.resource.data.keys().hasOnly(['speed', 'autoMicOnDelay', 'isAutoMode', 'speakingStyle', 'updatedAt']) &&
+          request.resource.data.speed is number &&
+          request.resource.data.speed >= 0.5 && request.resource.data.speed <= 1.5 &&
+          request.resource.data.autoMicOnDelay is number &&
+          request.resource.data.autoMicOnDelay >= 1.0 && request.resource.data.autoMicOnDelay <= 10.0 &&
+          (!('isAutoMode' in request.resource.data) || request.resource.data.isAutoMode is bool) &&
+          (!('speakingStyle' in request.resource.data) || request.resource.data.speakingStyle in ['Formal', 'Casual']) &&
+          request.resource.data.updatedAt is number
+        ) || isAdmin();
+      }
+
+      // Other child documents under user (e.g. stats, history, progress)
+      match /{allChildren=**} {
+        allow get, list, read: if isOwner() || isAdmin();
+        allow write: if (isOwner() && !touchesRestrictedKeys()) || isAdmin();
+      }
+    }
+
+    // Global files collection
+    match /files/{fileId} {
+      allow get, list, read: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow create, update, delete: if (isSignedIn() && request.resource.data.userId == request.auth.uid) || isAdmin();
+    }
+
+    // Payment Audit & GST Compliance Logs - Server / Admin Write Only
+    match /payment_audit_logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if isAdmin();
+    }
+
+    // Customer Complaints & Support Tickets - User Isolated & Admin Full Access
+    match /complaints/{ticketId} {
+      allow get: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow list: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow create: if (isSignedIn() && request.resource.data.userId == request.auth.uid) || isAdmin();
+      allow update: if (isSignedIn() && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid) || isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}
+

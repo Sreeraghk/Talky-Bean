@@ -1,10 +1,97 @@
-import { LanguageLevel, Exercise, VocabularyWord, GrammarTip } from "../types";
+import { LanguageLevel, Exercise, VocabularyWord, GrammarTip, AdvancedExercise, AdvancedExerciseType } from "../types";
 import { PerformanceService } from "./PerformanceService";
 import { AiService } from "./AiService";
 import { Type } from "@google/genai";
 import { getLanguageConfig } from "../config/languages";
 
 export class ExerciseService {
+  private static getCompactPrompt(type: AdvancedExerciseType, level: string, lang: string, items: string): string {
+    const schemas = {
+      'mix-and-match': '{"question":"Match...","pairs":[{"id":"1","term":"word","definition":"meaning"}]}',
+      'context-master': '{"question":"Choose...","passage":"Story...","options":["A","B"],"correctAnswerIndex":0,"explanation":"..."}',
+      'speed-choice': '{"question":"Quick!","options":["A","B"],"correctAnswerIndex":0,"explanation":"...","timeLimit":10}'
+    };
+    return `Generate a ${lang} ${type} exercise (${level}). Focus on: ${items}. Return JSON: ${schemas[type]}`;
+  }
+
+  static async generateBatchAdvanced(
+    types: AdvancedExerciseType[],
+    level: LanguageLevel,
+    vocabulary: VocabularyWord[],
+    grammarTips: GrammarTip[],
+    languageCode: string
+  ): Promise<AdvancedExercise[]> {
+    const langName = getLanguageConfig(languageCode).name;
+    
+    const filteredVocab = vocabulary.filter(v => v.languageCode === languageCode);
+    const filteredGrammar = grammarTips.filter(g => g.languageCode === languageCode);
+    
+    // Parallel generation
+    return Promise.all(types.map(type => this.generateAdvanced(type, level, filteredVocab, filteredGrammar, langName)));
+  }
+
+  private static async generateAdvanced(
+    type: AdvancedExerciseType,
+    level: LanguageLevel,
+    vocabulary: VocabularyWord[],
+    grammarTips: GrammarTip[],
+    langName: string
+  ): Promise<AdvancedExercise> {
+    const items = [...vocabulary.slice(-5), ...grammarTips.slice(-3)].map(i => 'word' in i ? i.word : i.rule).join(', ');
+    const prompt = this.getCompactPrompt(type, level, langName, items);
+
+    const ai = AiService.getClient();
+    const schema = {
+      type: Type.OBJECT,
+      properties: {
+        question: { type: Type.STRING },
+        data: {
+          type: Type.OBJECT,
+          properties: {
+            pairs: { 
+              type: Type.ARRAY, 
+              items: { 
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING },
+                  term: { type: Type.STRING },
+                  definition: { type: Type.STRING }
+                },
+                required: ["id", "term", "definition"]
+              }
+            },
+            passage: { type: Type.STRING },
+            options: { type: Type.ARRAY, items: { type: Type.STRING } },
+            correctAnswerIndex: { type: Type.INTEGER },
+            explanation: { type: Type.STRING },
+            timeLimit: { type: Type.INTEGER }
+          }
+        },
+        difficulty: { type: Type.NUMBER }
+      },
+      required: ["question", "data", "difficulty"]
+    };
+
+    const response = await ai.models.generateContent({
+      model: AiService.getModelName(),
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: schema as any
+      },
+    });
+
+    const text = response.text || "";
+
+    const cleanText = text.replace(/```json\n?|```/g, "").trim();
+    const result = JSON.parse(cleanText || "{}");
+    return {
+      id: Math.random().toString(36).substr(2, 9),
+      type,
+      ...result
+    };
+  }
+
   static async generateAdaptiveExercise(
     level: LanguageLevel,
     vocabulary: VocabularyWord[],
@@ -15,9 +102,13 @@ export class ExerciseService {
     const langConfig = getLanguageConfig(languageCode);
     const langName = langConfig.name;
     
+    // Filter items by language
+    const filteredVocab = vocabulary.filter(v => v.languageCode === languageCode);
+    const filteredGrammar = grammarTips.filter(g => g.languageCode === languageCode);
+    
     // Choose type based on history or random
     const type = Math.random() > 0.5 ? 'vocabulary' : 'grammar';
-    const items = type === 'vocabulary' ? vocabulary : grammarTips;
+    const items = type === 'vocabulary' ? filteredVocab : filteredGrammar;
     
     if (items.length === 0) {
       // Fallback if no items learned yet
@@ -56,7 +147,7 @@ export class ExerciseService {
     const ai = AiService.getClient();
     const response = await ai.models.generateContent({
       model: AiService.getModelName(),
-      contents: prompt,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -73,7 +164,10 @@ export class ExerciseService {
       },
     });
 
-    const data = JSON.parse(response.text);
+    const text = response.text || "";
+
+    const cleanText = text.replace(/```json\n?|```/g, "").trim();
+    const data = JSON.parse(cleanText || "{}");
     
     return {
       id: Math.random().toString(36).substr(2, 9),
@@ -102,7 +196,7 @@ export class ExerciseService {
     const ai = AiService.getClient();
     const response = await ai.models.generateContent({
       model: AiService.getModelName(),
-      contents: prompt,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
       config: {
         responseMimeType: "application/json",
         responseSchema: {
@@ -119,7 +213,10 @@ export class ExerciseService {
       },
     });
 
-    const data = JSON.parse(response.text);
+    const text = response.text || "";
+
+    const cleanText = text.replace(/```json\n?|```/g, "").trim();
+    const data = JSON.parse(cleanText || "{}");
     
     return {
       id: Math.random().toString(36).substr(2, 9),

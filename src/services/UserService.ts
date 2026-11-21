@@ -1,21 +1,29 @@
 import { UserProfile } from "../types";
 import { AiService } from "./AiService";
+import { CloudStatsService } from "./CloudStatsService";
 
 export class UserService {
-  private static STORAGE_KEY = 'easy_lang_user_profile';
+  private static STORAGE_KEY = 'user_profile';
 
   static getProfile(): UserProfile | null {
-    const saved = localStorage.getItem(this.STORAGE_KEY);
-    if (!saved) return null;
-    try {
-      return JSON.parse(saved);
-    } catch (e) {
-      return null;
+    const saved = localStorage.getItem('langeasy_user_profile'); // Legacy fallback
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        this.saveProfile(parsed);
+        localStorage.removeItem('langeasy_user_profile');
+        return parsed;
+      } catch (e) {}
     }
+
+    const current = localStorage.getItem('langeasy_user_profile_v2');
+    if (current) return JSON.parse(current);
+    return null;
   }
 
   static saveProfile(profile: UserProfile) {
-    localStorage.setItem(this.STORAGE_KEY, JSON.stringify(profile));
+    localStorage.setItem('langeasy_user_profile_v2', JSON.stringify(profile));
+    CloudStatsService.syncProfile(profile);
   }
 
   static async updateGoals(goals: string): Promise<UserProfile> {
@@ -34,7 +42,7 @@ export class UserService {
 
     const response = await ai.models.generateContent({
       model: AiService.getModelName(),
-      contents: prompt,
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
     });
 
     const updatedProfile: UserProfile = {

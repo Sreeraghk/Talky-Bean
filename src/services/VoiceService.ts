@@ -1,7 +1,11 @@
 import { Capacitor } from '@capacitor/core';
 import { TextToSpeech } from '@capacitor-community/text-to-speech';
 import { SpeechRecognition } from '@capacitor-community/speech-recognition';
+import { Haptics, ImpactStyle } from '@capacitor/haptics';
 import { getLanguageConfig } from '../config/languages';
+import { AI_CONFIG } from '../config/aiConfig';
+import { AiService } from './AiService';
+import { platformService } from './PlatformService';
 
 export interface VoiceOptions {
   text: string;
@@ -12,7 +16,8 @@ export interface VoiceOptions {
   gender?: 'male' | 'female';
   voiceId?: string;
   languageCode?: string;
-  useGeminiTTS?: boolean;
+  isNaturalMode?: boolean;
+  onStart?: () => void;
 }
 
 export interface RecognitionResult {
@@ -21,228 +26,295 @@ export interface RecognitionResult {
 }
 
 class NativeVoiceService {
-  private isNative = Capacitor.isNativePlatform();
   private webRecognition: any = null;
   private nativeListeners: any[] = [];
+  private currentAudio: HTMLAudioElement | null = null;
+  private currentUtterance: SpeechSynthesisUtterance | null = null;
+  private currentSessionId = 0;
+  private isInternalStop = false;
 
-  async speak(options: VoiceOptions): Promise<void> {
+  constructor() {
+    // Initial platform log
+    console.log(`[Buddy] Voice Subsystem initialized using strategy: ${platformService.isWeb() ? 'WEB-OPTIMIZED' : 'NATIVE-OPTIMIZED'}`);
+    
+    // Proactive voice loading for Web Speech API
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      window.speechSynthesis.getVoices();
+    }
+  }
+
+  async speak(options: VoiceOptions & { onProgress?: (percent: number) => void }): Promise<void> {
+    const platform = platformService.getConfig();
+    const aiConfig = AI_CONFIG;
     const config = getLanguageConfig(options.languageCode || 'de');
     const lang = options.lang || config.ttsLang;
 
-    if (options.useGeminiTTS) {
-      await this.geminiSpeak(options);
-      return;
+    // Clean text: Strip all technical markers like [SPEAKER 1], [OVERLAP], [PAUSE]
+    const cleanedText = options.text
+      .replace(/\[SPEAKER \d+\]:?/gi, '')
+      .replace(/\[[A-Z0-9_\s]+\]/gi, '') // Strip any [TAGS]
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    this.stopSpeaking();
+    const sessionId = ++this.currentSessionId;
+
+    let finalRate = options.rate || aiConfig.voiceSettings.rate;
+    let finalPitch = options.pitch || aiConfig.voiceSettings.pitch;
+    const voiceName = aiConfig.voiceSettings.voiceName;
+
+    const finalOptions = { ...options, text: cleanedText };
+
+    // Natural mode: slightly more pitch variation and dynamic speed
+    if (finalOptions.isNaturalMode) {
+      finalPitch = 1.05;
+      finalRate = Math.max(0.9, finalRate * 1.02);
+
+      // PROSODY HACK: If text has excitement (!!), increase pitch
+      if (cleanedText.includes('!!')) {
+        finalPitch += 0.05;
+      }
+      // PROSODY HACK: If text has hesitation (...), decrease rate
+      if (cleanedText.includes('...')) {
+        finalRate *= 0.95;
+      }
+      // PROSODY HACK: If text has emphasis (CAPS), increase pitch/volume
+      if (/[A-Z]{2,}/.test(cleanedText)) {
+        finalPitch += 0.02;
+      }
     }
 
-    if (this.isNative) {
+    if (platform.isNative) {
       try {
+        if (finalOptions.onStart) finalOptions.onStart();
+        // CALL NATIVE OS ENGINE (Android/iOS)
         await TextToSpeech.speak({
-          text: options.text,
+          text: finalOptions.text,
           lang: lang,
-          rate: options.rate || 1.0,
-          pitch: options.pitch || 1.0,
-          volume: options.volume || 1.0,
+          rate: finalRate,
+          pitch: finalPitch,
+          volume: finalOptions.volume || 1.0,
           category: 'ambient',
         });
+        console.log(`[Buddy] Native OS Voice conversion completed on-device.`);
       } catch (error) {
-        console.error('Native TTS error, falling back to Web:', error);
-        await this.webSpeak({ ...options, lang });
+        console.error('Native TTS failed, falling back to Web strategy:', error);
+        await this.webSpeak({ ...finalOptions, lang, rate: finalRate, pitch: finalPitch }, sessionId, finalOptions.onProgress, finalOptions.onStart);
       }
     } else {
-      await this.webSpeak({ ...options, lang });
+      // On Web, this invovkes the browser's Web Speech API
+      await this.webSpeak({ ...finalOptions, lang, rate: finalRate, pitch: finalPitch }, sessionId, finalOptions.onProgress, finalOptions.onStart);
     }
   }
 
-  private async geminiSpeak(options: VoiceOptions): Promise<void> {
-    const { AiService } = await import('./AiService');
-    const { Modality } = await import('@google/genai');
-    const ai = AiService.getClient();
-    const config = getLanguageConfig(options.languageCode || 'de');
-
-    const audioPrompt = `Speak the following ${config.name} text. 
-    
-    CRITICAL INSTRUCTIONS FOR AUTHENTICITY:
-    1. PACE: Speak at a natural, authentic speed for a human conversation. Not too fast, not robotic.
-    2. PAUSES: Strictly follow the "..." and "-" markers for pauses and shifts.
-    3. INTONATION: Use expressive, human-like intonation. Pay close attention to ALL CAPS words for emphasis.
-    
-    TEXT:
-    ${options.text}`;
-
-    try {
-      const response = await ai.models.generateContent({
-        model: AiService.getSpeechModelName(),
-        contents: [{ parts: [{ text: audioPrompt }] }],
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { 
-              prebuiltVoiceConfig: { voiceName: 'Kore' } 
-            },
-          },
-        },
-      });
-
-      const audioData = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-      if (audioData) {
-        // Gemini TTS returns raw PCM (16-bit, 24kHz, mono).
-        // We need to wrap it in a WAV header for the browser to play it.
-        const pcmData = Uint8Array.from(atob(audioData), c => c.charCodeAt(0));
-        const wavData = this.encodeWAV(pcmData, 24000);
-        const blob = new Blob([wavData], { type: 'audio/wav' });
-        const audioUrl = URL.createObjectURL(blob);
-        const audio = new Audio(audioUrl);
-        
-        return new Promise((resolve) => {
-          audio.onended = () => {
-            URL.revokeObjectURL(audioUrl);
-            resolve();
-          };
-          audio.onerror = () => {
-            URL.revokeObjectURL(audioUrl);
-            resolve();
-          };
-          audio.play();
-        });
-      }
-    } catch (error) {
-      console.error('Gemini TTS error, falling back to local:', error);
-      // Fallback to local TTS
-      if (this.isNative) {
-        await TextToSpeech.speak({
-          text: options.text,
-          lang: options.lang || config.ttsLang,
-          rate: options.rate || 1.0,
-          pitch: options.pitch || 1.0,
-          volume: options.volume || 1.0,
-          category: 'ambient',
-        });
-      } else {
-        await this.webSpeak(options);
-      }
-    }
-  }
-
-  private encodeWAV(pcmData: Uint8Array, sampleRate: number): Uint8Array {
-    const header = new ArrayBuffer(44);
-    const view = new DataView(header);
-
-    // RIFF identifier
-    this.writeString(view, 0, 'RIFF');
-    // File length
-    view.setUint32(4, 36 + pcmData.length, true);
-    // RIFF type
-    this.writeString(view, 8, 'WAVE');
-    // Format chunk identifier
-    this.writeString(view, 12, 'fmt ');
-    // Format chunk length
-    view.setUint32(16, 16, true);
-    // Sample format (1 is PCM)
-    view.setUint16(20, 1, true);
-    // Channel count
-    view.setUint16(22, 1, true);
-    // Sample rate
-    view.setUint32(24, sampleRate, true);
-    // Byte rate (sampleRate * blockAlign)
-    view.setUint32(28, sampleRate * 2, true);
-    // Block align (channelCount * bytesPerSample)
-    view.setUint16(32, 2, true);
-    // Bits per sample
-    view.setUint16(34, 16, true);
-    // Data chunk identifier
-    this.writeString(view, 36, 'data');
-    // Data chunk length
-    view.setUint32(40, pcmData.length, true);
-
-    const wav = new Uint8Array(44 + pcmData.length);
-    wav.set(new Uint8Array(header), 0);
-    wav.set(pcmData, 44);
-
-    return wav;
-  }
-
-  private writeString(view: DataView, offset: number, string: string): void {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
-    }
-  }
-
-  private webSpeak(options: VoiceOptions): Promise<void> {
+  private webSpeak(options: VoiceOptions, sessionId: number, onProgress?: (percent: number) => void, onStart?: () => void): Promise<void> {
     return new Promise((resolve) => {
-      const startSpeaking = () => {
-        const utterance = new SpeechSynthesisUtterance(options.text);
+      if (typeof window === 'undefined' || !window.speechSynthesis) {
+        resolve();
+        return;
+      }
+
+      // CRITICAL: Force a full reset of the browser speech queue before starting a new one
+      // This prevents the "silent hang" common in Chrome/Edge/Mobile
+      try {
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.resume();
+      } catch (e) {
+        console.warn("[VoiceService] Pre-speak reset failed:", e);
+      }
+
+      const runSpeak = () => {
+        if (this.currentSessionId !== sessionId) {
+          resolve();
+          return;
+        }
+
+        const textToSpeak = options.text
+          .replace(/\[[A-Z0-9_\s]+\]/gi, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+
+        if (!textToSpeak) {
+          resolve();
+          return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(textToSpeak);
+        this.currentUtterance = utterance;
+        if (typeof window !== 'undefined') {
+          (window as any)._activeUtterance = utterance; // Keep global reference to prevent garbage collection on Chrome/Safari
+        }
+        
         utterance.lang = options.lang || 'de-DE';
+        const aiConfig = AI_CONFIG;
+        let rate = options.rate || aiConfig.voiceSettings.rate;
+        let pitch = options.pitch || aiConfig.voiceSettings.pitch;
         
-        // Base rate and pitch
-        let rate = options.rate || 1.0;
-        let pitch = options.pitch || 1.0;
-        
-        // Persona-specific variations (only for German for now, but can be expanded)
-        if (options.voiceId && utterance.lang.startsWith('de')) {
-          switch (options.voiceId) {
-            case 'hans': pitch = 0.8; rate *= 0.9; break;
-            case 'lukas': pitch = 1.0; rate *= 1.1; break;
-            case 'greta': pitch = 1.1; rate *= 1.15; break;
-            case 'heidi': pitch = 1.3; rate *= 0.85; break;
-          }
+        if (options.isNaturalMode) {
+          rate = Math.max(0.7, rate * 0.95);
         }
 
         utterance.rate = rate;
         utterance.pitch = pitch;
         utterance.volume = options.volume || 1.0;
         
-        if (window.speechSynthesis) {
-          const voices = window.speechSynthesis.getVoices();
-          const targetVoices = voices.filter(v => v.lang.startsWith(utterance.lang.split('-')[0]));
+        const voices = window.speechSynthesis.getVoices();
+        const targetVoices = voices.filter(v => 
+          v.lang && (v.lang.startsWith(utterance.lang.split('-')[0]) || v.lang.includes(utterance.lang.replace('-', '_')))
+        );
+        
+        if (targetVoices.length > 0) {
+          // Robust Local Voice Filtering: prioritize local (offline) voices to prevent empty or silent cloud voice streaming failures
+          const localPool = targetVoices.filter(v => v.localService === true);
+          const activeTargetVoices = localPool.length > 0 ? localPool : targetVoices;
+
+          const naturalPool = activeTargetVoices.filter(v => 
+            v.name.toLowerCase().includes('natural') || 
+            v.name.toLowerCase().includes('google') || 
+            v.name.toLowerCase().includes('premium') ||
+            v.name.toLowerCase().includes('siri') ||
+            v.name.toLowerCase().includes('enhanced') ||
+            v.name.toLowerCase().includes('samsung')
+          );
+
+          const voicePool = naturalPool.length > 0 ? naturalPool : activeTargetVoices;
           
-          if (targetVoices.length > 0) {
-            let selectedVoice = null;
-            
-            // Try to find a voice matching the gender and language
-            const maleKeywords = ['male', 'man', 'boy', 'hans', 'stefan', 'markus', 'lukas', 'google deutsch', 'google french', 'google spanish'];
-            const femaleKeywords = ['female', 'woman', 'girl', 'greta', 'heidi', 'marlene', 'anna', 'google german', 'google french', 'google spanish'];
-            
-            if (options.gender === 'male') {
-              selectedVoice = targetVoices.find(v => maleKeywords.some(k => v.name.toLowerCase().includes(k)));
-            } else {
-              selectedVoice = targetVoices.find(v => femaleKeywords.some(k => v.name.toLowerCase().includes(k)));
-            }
-            
-            if (!selectedVoice && targetVoices.length >= 2 && options.voiceId) {
-              const index = options.voiceId.length;
-              selectedVoice = targetVoices[index % targetVoices.length];
-            }
-            
-            utterance.voice = selectedVoice || targetVoices[0];
+          const maleKeywords = ['male', 'man', 'boy', 'hans', 'stefan', 'markus', 'lukas', 'pierre', 'pablo', 'marco', 'ivan', 'thomas', 'david', 'andreas'];
+          const femaleKeywords = ['female', 'woman', 'girl', 'greta', 'heidi', 'marlene', 'anna', 'élodie', 'sophie', 'maría', 'elena', 'giulia', 'melina', 'samantha'];
+          
+          let selectedVoice = null;
+          if (options.gender === 'male') {
+            selectedVoice = voicePool.find(v => maleKeywords.some(k => v.name.toLowerCase().includes(k)));
+          } else {
+            selectedVoice = voicePool.find(v => femaleKeywords.some(k => v.name.toLowerCase().includes(k)));
           }
+
+          utterance.voice = selectedVoice || voicePool[0];
         }
         
-        utterance.onend = () => resolve();
-        utterance.onerror = () => resolve();
-        window.speechSynthesis.speak(utterance);
+        utterance.onstart = () => {
+          console.log("[VoiceService] Speech output physical START.");
+          if (onStart) onStart();
+        };
+
+        // Safety timeout: Browsers sometimes fail to fire onend for long strings or lockups
+        // We calculate an aggressive but safe upper bound: 150ms per character + 6s buffer
+        const estimatedDurationMs = (textToSpeak.length * 150) + 6000;
+        const safetyTimeout = setTimeout(() => {
+          console.warn("[VoiceService] UTTERANCE HANG DETECTED. Forcing resolution.");
+          this.currentUtterance = null;
+          if (typeof window !== 'undefined') {
+            delete (window as any)._activeUtterance;
+          }
+          resolve();
+        }, estimatedDurationMs);
+
+        utterance.onend = () => {
+          console.log("[VoiceService] Speech output physical END.");
+          clearTimeout(safetyTimeout);
+          if (onProgress) onProgress(100);
+          this.currentUtterance = null;
+          if (typeof window !== 'undefined') {
+            delete (window as any)._activeUtterance;
+          }
+          resolve();
+        };
+
+        utterance.onerror = (e) => {
+          const isBenign = (e as any)?.error === 'canceled' || (e as any)?.error === 'interrupted';
+          if (!isBenign) {
+            console.warn("[VoiceService] Speech output event notice:", (e as any)?.error || e);
+          }
+          clearTimeout(safetyTimeout);
+          this.currentUtterance = null;
+          if (typeof window !== 'undefined') {
+            delete (window as any)._activeUtterance;
+          }
+          resolve();
+        };
+
+        utterance.onboundary = (event) => {
+          if (onProgress && utterance.text.length > 0) {
+            const percent = (event.charIndex / utterance.text.length) * 100;
+            onProgress(percent);
+          }
+        };
+
+        try {
+          window.speechSynthesis.speak(utterance);
+        } catch (e) {
+          console.warn("[VoiceService] Hardware speak invocation notice:", e);
+          clearTimeout(safetyTimeout);
+          resolve();
+        }
       };
 
-      if (window.speechSynthesis.getVoices().length === 0) {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length === 0) {
+        // Retry voices fetching for 1.5 seconds maximum
+        let voiceRetries = 0;
+        const checkVoices = setInterval(() => {
+          voiceRetries++;
+          const currentVoices = window.speechSynthesis.getVoices();
+          if (currentVoices.length > 0 || voiceRetries > 15) {
+            clearInterval(checkVoices);
+            window.speechSynthesis.onvoiceschanged = null;
+            // Settlement delay of 120ms to allow cancel() to completed in underlying browser thread
+            setTimeout(runSpeak, 120);
+          }
+        }, 100);
+
         window.speechSynthesis.onvoiceschanged = () => {
+          clearInterval(checkVoices);
           window.speechSynthesis.onvoiceschanged = null;
-          startSpeaking();
+          setTimeout(runSpeak, 120);
         };
       } else {
-        startSpeaking();
+        setTimeout(runSpeak, 120);
       }
     });
   }
 
+  pauseSpeaking(): void {
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+    } else if (window.speechSynthesis) {
+      window.speechSynthesis.pause();
+    }
+  }
+
+  resumeSpeaking(): void {
+    if (this.currentAudio) {
+      this.currentAudio.play().catch(() => {});
+    } else if (window.speechSynthesis) {
+      window.speechSynthesis.resume();
+    }
+  }
+
   stopSpeaking(): void {
-    if (this.isNative) {
-      TextToSpeech.stop().catch(err => console.error('Error stopping native TTS:', err));
+    this.currentSessionId++;
+    if (this.currentAudio) {
+      this.currentAudio.pause();
+      this.currentAudio.currentTime = 0;
+      this.currentAudio = null;
+    }
+    if (platformService.isNative()) {
+      TextToSpeech.stop().catch(() => {});
     } else {
       window.speechSynthesis.cancel();
     }
   }
 
+  get isActive(): boolean {
+    return !!this.currentAudio || (window.speechSynthesis && window.speechSynthesis.speaking);
+  }
+
+  get isPaused(): boolean {
+    return (this.currentAudio && this.currentAudio.paused) || (window.speechSynthesis && window.speechSynthesis.paused) || false;
+  }
+
   async checkPermissions(): Promise<boolean> {
-    if (this.isNative) {
+    if (platformService.isNative()) {
       try {
         const status = await SpeechRecognition.checkPermissions();
         return status.speechRecognition === 'granted';
@@ -251,22 +323,11 @@ class NativeVoiceService {
         return false;
       }
     }
-    
-    // Web Permissions API check
-    if (navigator.permissions && navigator.permissions.query) {
-      try {
-        const result = await navigator.permissions.query({ name: 'microphone' as any });
-        return result.state === 'granted';
-      } catch (e) {
-        console.warn('Permissions API error:', e);
-      }
-    }
-    
-    return false; // Default to false if we can't verify without prompting
+    return true; 
   }
 
   async requestPermissions(): Promise<boolean> {
-    if (this.isNative) {
+    if (platformService.isNative()) {
       try {
         const status = await SpeechRecognition.requestPermissions();
         return status.speechRecognition === 'granted';
@@ -275,155 +336,254 @@ class NativeVoiceService {
         return false;
       }
     }
-    
-    // Web: Trigger prompt via getUserMedia
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      stream.getTracks().forEach(track => track.stop());
-      return true;
-    } catch (e) {
-      console.error('Microphone request error:', e);
-      return false;
-    }
+    return true; 
   }
 
   async startListening(lang: string = 'de-DE', onResult: (result: RecognitionResult) => void, onError: (error: any) => void, onEnd?: () => void): Promise<void> {
-    // Ensure any existing session is stopped first
+    const platform = platformService.getConfig();
+    console.log(`[Buddy] STT session start. Platform: ${platform.type.toUpperCase()}, Mode: ${platform.sttEngine.toUpperCase()}`);
+    
+    this.isInternalStop = true;
+    this.stopSpeaking(); // Kill any residual TTS audio focus
     await this.stopListening();
+    this.isInternalStop = false;
+    
+    // Platform-specific release delay: Significantly increased for native hardware transition
+    const releaseDelay = platform.isNative ? 1500 : 500; 
+    await new Promise(resolve => setTimeout(resolve, releaseDelay));
 
-    if (this.isNative) {
-      try {
-        const available = await SpeechRecognition.available();
-        if (!available.available) {
-          throw new Error('Speech recognition not available on this device');
+    if (platform.sttEngine === 'native') {
+      let attempts = 0;
+      const maxAttempts = 3; // Retry budget for native hardware
+
+      const tryStartNative = async (): Promise<void> => {
+        try {
+          console.log(`[Buddy] STT Attempt ${attempts + 1} starting...`);
+          
+          // PROACTIVE hardware reset: Clear state before trying to start
+          await SpeechRecognition.stop().catch(() => {});
+          await new Promise(r => setTimeout(r, 400)); // Small gap for hardware transition
+
+          if (platform.hapticsEnabled) {
+            try { await Haptics.impact({ style: ImpactStyle.Light }); } catch (e) {}
+          }
+
+          // Clear old listeners safely
+          for (const listener of this.nativeListeners) await listener.remove();
+          this.nativeListeners = [];
+
+          this.nativeListeners.push(await SpeechRecognition.addListener('partialResults', (data: any) => {
+            console.log("[Buddy] Raw Partial Data:", JSON.stringify(data));
+            const matches = data.matches || (data.value ? [data.value] : []);
+            if (matches && matches.length > 0) {
+              onResult({ transcript: matches[0], isFinal: false });
+            }
+          }));
+
+          this.nativeListeners.push(await (SpeechRecognition as any).addListener('results', (data: any) => {
+            console.log("[Buddy] Raw Final Data:", JSON.stringify(data));
+            const matches = data.matches || (data.value ? [data.value] : []);
+            if (matches && matches.length > 0) {
+              if (platform.hapticsEnabled) {
+                try { Haptics.notification({ type: (ImpactStyle as any).Success }); } catch (e) {}
+              }
+              onResult({ transcript: matches[0], isFinal: true });
+            }
+          }));
+
+          this.nativeListeners.push(await (SpeechRecognition as any).addListener('error', (data: { message: string }) => {
+            console.error("Native STT Internal Error:", data.message);
+            // Some platforms send 'error' on stop, so we handle it gracefully
+            if (data.message.includes('No recognizer') || data.message.includes('No match')) {
+              console.log("[Buddy] Non-critical recognition error.");
+            } else {
+              onError(data.message);
+            }
+          }));
+
+          this.nativeListeners.push(await SpeechRecognition.addListener('listeningState', (data: { status: "started" | "stopped" }) => {
+            console.log(`[Buddy] Hardware State: ${data.status}`);
+            if (data.status === 'stopped' && onEnd && !this.isInternalStop) {
+              setTimeout(() => {
+                if (!this.isInternalStop) onEnd();
+              }, 300);
+            }
+          }));
+
+          await SpeechRecognition.start({
+            language: lang,
+            maxResults: 1,
+            partialResults: true,
+            popup: false,
+          });
+          console.log("[Buddy] Hardware session confirmed STARTED.");
+        } catch (error) {
+          attempts++;
+          if (attempts < maxAttempts) {
+            console.warn(`[Buddy] STT Start attempt ${attempts} failed. Retrying...`, error);
+            await new Promise(r => setTimeout(r, 200));
+            return tryStartNative();
+          }
+          console.error('Native STT permanent failure after retries:', error);
+          onError(error);
         }
+      };
 
-        // Add listeners BEFORE starting
-        const partialListener = await SpeechRecognition.addListener('partialResults', (data: any) => {
-          if (data.matches && data.matches.length > 0) {
-            onResult({ transcript: data.matches[0], isFinal: false });
-          }
-        });
-
-        // Use any to bypass strict type checking for 'results' event which exists in some versions/platforms
-        const resultsListener = await (SpeechRecognition as any).addListener('results', (data: any) => {
-          if (data.matches && data.matches.length > 0) {
-            onResult({ transcript: data.matches[0], isFinal: true });
-          }
-        });
-
-        const errorListener = await (SpeechRecognition as any).addListener('error', (data: { message: string }) => {
-          console.error("Native Speech Recognition Error:", data.message);
-          if (onError) onError(data.message);
-        });
-
-        const stateListener = await SpeechRecognition.addListener('listeningState', (data: { status: "started" | "stopped" }) => {
-          console.log(`Native Speech Recognition State: ${data.status}`);
-          if (data.status === 'stopped' && onEnd) {
-            // Small delay to ensure any final results are processed
-            setTimeout(() => onEnd(), 300);
-          }
-        });
-
-        this.nativeListeners.push(partialListener, resultsListener, stateListener, errorListener);
-
-        // Small delay to ensure previous session is fully cleaned up
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        // Start recognition
-        SpeechRecognition.start({
-          language: lang,
-          maxResults: 5,
-          prompt: 'Sprechen Sie jetzt...',
-          partialResults: true,
-          popup: false,
-        }).catch(err => {
-          console.error('Error starting native recognition:', err);
-          onError(err);
-        });
-      } catch (error) {
-        console.error('Native STT error:', error);
-        onError(error);
-      }
+      await tryStartNative();
     } else {
+      console.log("[Buddy] Using Web Strategy for STT.");
       this.webRecognition = this.webStartListening(lang, onResult, onError, onEnd);
     }
   }
 
   private webStartListening(lang: string, onResult: (result: RecognitionResult) => void, onError: (error: any) => void, onEnd?: () => void): any {
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      onError('Speech recognition not supported in this browser');
+    const SpeechRec = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRec) {
+      onError('STT not supported in this browser version.');
       return null;
     }
 
-    const recognition = new SpeechRecognition();
-    recognition.lang = lang;
-    recognition.interimResults = true;
-    recognition.continuous = true;
-
-    let finalizedTranscript = '';
-
-    recognition.onresult = (event: any) => {
-      let interimTranscript = '';
+    try {
+      const recognition = new SpeechRec();
+      recognition.lang = lang;
+      recognition.interimResults = true;
+      recognition.continuous = false;
+      recognition.maxAlternatives = 1;
       
-      for (let i = 0; i < event.results.length; ++i) {
-        const transcript = event.results[i][0].transcript.trim();
-        if (event.results[i].isFinal) {
-          // Robust merging: handle both segmented and cumulative results
-          // If this result starts with the previous finalized transcript, it's cumulative
-          if (finalizedTranscript && transcript.toLowerCase().startsWith(finalizedTranscript.toLowerCase().trim())) {
-            finalizedTranscript = transcript;
-          } else if (finalizedTranscript && finalizedTranscript.toLowerCase().includes(transcript.toLowerCase())) {
-            // If it's already contained, skip it (some browsers repeat results)
-            continue;
-          } else {
-            // Otherwise, append it
-            finalizedTranscript += (finalizedTranscript ? ' ' : '') + transcript;
+      // Hardware Warm-up Diagnostic
+      let hasReceivedAudio = false;
+
+      recognition.onstart = () => {
+        console.log("[Buddy] Web STT hardware session active.");
+      };
+
+      recognition.onaudiostart = () => {
+        console.log("[Buddy] Web STT: Audio capture started.");
+        hasReceivedAudio = true;
+      };
+
+      recognition.onspeechstart = () => {
+        console.log("[Buddy] Web STT: Speech detected.");
+      };
+
+      recognition.onresult = (event: any) => {
+        if (!event.results || event.results.length === 0) return;
+        
+        hasReceivedAudio = true; // Confirmation
+        console.log(`[VoiceService] Web Result Received. Total results: ${event.results.length}`);
+        
+        // Advanced extraction: Browser speech API result formatting varies widely
+        let accumulatedTranscript = '';
+        let isCurrentResultFinal = false;
+
+        for (let i = 0; i < event.results.length; ++i) {
+          const result = event.results[i];
+          if (!result) continue;
+          
+          // Try multiple property names for the transcript string
+          const segment = result[0]?.transcript || result.transcript || result.text || "";
+          
+          if (segment) {
+            accumulatedTranscript += (accumulatedTranscript ? " " : "") + segment;
+            if (result.isFinal) isCurrentResultFinal = true;
           }
-        } else {
-          interimTranscript += transcript + ' ';
         }
-      }
 
-      const fullTranscript = (finalizedTranscript + ' ' + interimTranscript).trim();
-      if (fullTranscript) {
-        onResult({ 
-          transcript: fullTranscript, 
-          isFinal: event.results[event.results.length - 1].isFinal 
-        });
-      }
-    };
+        const fullTranscript = accumulatedTranscript.trim();
+        if (fullTranscript) {
+          console.log(`[VoiceService] Captured: "${fullTranscript}" (Final: ${isCurrentResultFinal})`);
+          onResult({ 
+            transcript: fullTranscript, 
+            isFinal: isCurrentResultFinal 
+          });
+        }
+      };
 
-    recognition.onerror = onError;
-    recognition.onend = () => {
-      this.webRecognition = null;
-      if (onEnd) onEnd();
-    };
-    recognition.start();
-    return recognition;
+      recognition.onerror = (event: any) => {
+        const error = event.error;
+        console.error("[Buddy] Web STT Logic Error:", error);
+        
+        // Handle specific 'network' errors which are common in browser Speech API
+        if (error === 'network') {
+          console.warn("[Buddy] Network error in Speech API. This often means the Google speech servers are unreachable.");
+          // Don't immediately fail; notify the system so it can decide whether to retry
+          onError('network-unreachable');
+        } else {
+          onError(error || 'unknown');
+        }
+      };
+
+      recognition.onend = () => {
+        if (this.webRecognition === recognition) {
+          console.log("[VoiceService] Web STT hardware session ended naturally.");
+          this.webRecognition = null;
+        }
+        if (onEnd) onEnd();
+      };
+
+      const tryStart = (retries = 3) => {
+        try {
+          recognition.start();
+        } catch (e: any) {
+          if (retries > 0 && e.message?.includes('already started')) {
+            console.warn("[VoiceService] STT already active, retrying after cleanup...");
+            recognition.stop();
+            setTimeout(() => tryStart(retries - 1), 300);
+          } else {
+            console.error("[VoiceService] Web STT Start permanent failure:", e);
+            onError(e);
+          }
+        }
+      };
+
+      tryStart();
+      return recognition;
+    } catch (e) {
+      onError(e);
+      return null;
+    }
   }
 
   async stopListening(): Promise<void> {
-    if (this.isNative) {
+    const platform = platformService.getConfig();
+    console.log(`[VoiceService] Requesting hardware STOP (${platform.type.toUpperCase()})`);
+    
+    // Prevent event echo during intentional stop
+    this.isInternalStop = true;
+
+    if (platform.isNative) {
       try {
-        await SpeechRecognition.stop();
+        // Use a race to ensure stop() doesn't hang the whole UI
+        await Promise.race([
+          SpeechRecognition.stop(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error("Stop timeout")), 1000))
+        ]);
+      } catch (e) {
+        console.warn("[VoiceService] Native stop signal failed or timed out:", e);
+      } finally {
+        // ALWAYS clear listeners regardless of stop success
         for (const listener of this.nativeListeners) {
-          listener.remove();
+          try { await listener.remove(); } catch (e) {}
         }
         this.nativeListeners = [];
-      } catch (e) {
-        console.error('Error stopping native recognition:', e);
+        this.isInternalStop = false;
       }
     } else if (this.webRecognition) {
       try {
-        this.webRecognition.stop();
+        const recognition = this.webRecognition;
         this.webRecognition = null;
+        recognition.onend = null;
+        recognition.onerror = null;
+        recognition.stop();
       } catch (e) {
-        console.error('Error stopping web recognition:', e);
+        console.warn("[VoiceService] Web stop signal failed:", e);
       }
     }
   }
 }
 
 export const voiceService = new NativeVoiceService();
+export const speak = (options: VoiceOptions & { onProgress?: (percent: number) => void }) => voiceService.speak(options);
+export const stopSpeaking = () => voiceService.stopSpeaking();
+export const pauseSpeaking = () => voiceService.pauseSpeaking();
+export const resumeSpeaking = () => voiceService.resumeSpeaking();

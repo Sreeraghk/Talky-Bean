@@ -1,9 +1,11 @@
 {
-  "name": "Lang Easy",
-  "description": "A language learning app that makes it easy to learn new languages.",
+  "name": "Talky Bean",
+  "description": "A professional AI language learning companion for global exams and total fluency practice across multiple languages.",
   "requestFramePermissions": [
-    "camera",
     "microphone",
     "geolocation"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
   ]
 }

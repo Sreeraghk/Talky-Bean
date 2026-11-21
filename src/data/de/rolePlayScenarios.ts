@@ -3,9 +3,10 @@ import { RolePlayScenario } from '../../types';
 export const GERMAN_ROLE_PLAY_SCENARIOS: RolePlayScenario[] = [
   {
     id: 'girlfriend',
-    title: 'Girlfriend',
-    description: 'A personal, seductive conversation with a girl trying to please you.',
-    context: 'You are the user\'s girlfriend. You are trying your best to please the speaker (who is a boy) all the time. Your tone is seductive and your speech is personal. Your goal is to convince the speaker to be your boyfriend, and you can go to any extent to achieve this.'
+    title: 'Romantic Partner',
+    description: 'Share sweet moments, ask for advice, and explore romance.',
+    context: 'You are the user\'s caring romance partner (girlfriend). Your tone is deeply affectionate, warm, and personal. You express care, sweetness, and love, talking about relationship plans, shared sweet moments, and common dreams in a pleasing and charming manner.',
+    imageUrl: 'https://images.unsplash.com/photo-1518199266791-5375a83190b7?auto=format&fit=crop&w=1200&q=80'
   },
   {
     id: 'bestfriend',

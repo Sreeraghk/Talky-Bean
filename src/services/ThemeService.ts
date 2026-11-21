@@ -1,28 +1,31 @@
 
-export type AppTheme = 'light' | 'dark' | 'midnight-neon' | 'street-graphite' | 'y2k-kawaii';
+export type AppTheme = 'light' | 'dark';
 
 export class ThemeService {
-  private static THEME_KEY = 'deutschbuddy_theme';
+  private static THEME_KEY = 'langeasy_theme';
 
   static getTheme(): AppTheme {
-    return (localStorage.getItem(this.THEME_KEY) as AppTheme) || 'dark';
+    const saved = localStorage.getItem(this.THEME_KEY);
+    if (saved === 'dark' || saved === 'light') {
+      return saved;
+    }
+    return 'dark';
   }
 
   static setTheme(theme: AppTheme) {
-    localStorage.setItem(this.THEME_KEY, theme);
-    document.documentElement.setAttribute('data-theme', theme);
+    const validTheme: AppTheme = (theme === 'light' || theme === 'dark') ? theme : 'dark';
+    localStorage.setItem(this.THEME_KEY, validTheme);
+    document.documentElement.setAttribute('data-theme', validTheme);
     
     // Apply theme class to html element
     document.documentElement.classList.remove('light', 'dark', 'midnight-neon', 'street-graphite', 'y2k-kawaii');
-    document.documentElement.classList.add(theme);
+    document.documentElement.classList.add(validTheme);
     window.dispatchEvent(new CustomEvent('theme-changed'));
   }
 
-  static toggleTheme() {
+  static toggleTheme(): AppTheme {
     const current = this.getTheme();
-    const themes: AppTheme[] = ['light', 'dark', 'midnight-neon', 'street-graphite', 'y2k-kawaii'];
-    const nextIndex = (themes.indexOf(current) + 1) % themes.length;
-    const next = themes[nextIndex];
+    const next: AppTheme = current === 'dark' ? 'light' : 'dark';
     this.setTheme(next);
     return next;
   }

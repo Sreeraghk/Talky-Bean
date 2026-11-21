@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from 'react';
-import { getLanguageConfig } from '../config/languages';
+import { getLanguageConfig, GREETINGS } from '../config/languages';
+import { AI_CONFIG } from '../config/aiConfig';
 import { ThemeService } from '../services/ThemeService';
 import { LanguageLevel, Message, SpeakingStyle, VocabularyWord } from '../types';
 import { AiService } from '../services/AiService';
@@ -9,9 +10,10 @@ interface UseGeminiChatProps {
   languageCode: string;
   speakingStyle: SpeakingStyle;
   context: string;
+  scenarioId?: string;
   vocabulary: VocabularyWord[];
   history?: Message[];
-  onTranscriptUpdate: (text: string, isUser: boolean, isFinal?: boolean) => void;
+  onTranscriptUpdate: (text: string, isUser: boolean, isFinal?: boolean, shouldSpeak?: boolean, translations?: Record<string, string>, suggestedWords?: {word: string, translation: string}[]) => void;
   onNewWordLearned: (word: string, translation: string) => void;
   onGrammarTip: (rule: string, explanation: string) => void;
 }
@@ -21,96 +23,118 @@ export function useGeminiChat({
   languageCode,
   speakingStyle,
   context,
+  scenarioId,
   vocabulary,
   history = [],
   onTranscriptUpdate,
   onNewWordLearned,
   onGrammarTip
 }: UseGeminiChatProps) {
+  const isProcessingRef = useRef(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const ai = useMemo(() => AiService.getClient(), []);
+  
+  const aiConfig = AI_CONFIG;
+  const [responseCount, setResponseCount] = useState(0);
   
   const langConfig = useMemo(() => getLanguageConfig(languageCode), [languageCode]);
   const langName = langConfig.name;
 
-  const personaInstruction = `YOUR PERSONA:
-  - You are ${langName}Buddy, a friendly and supportive ${langName}-speaking companion.
-  - You speak standard ${langName} clearly and naturally.
-  - You are a "Speech-Optimized Text Engine." Your goal is to generate text that sounds like a human speaking, not an AI.`;
+  const sessionContextRef = useRef<string>("");
 
-  const speechOptimizationRules = `SPEECH OPTIMIZATION (HUMAN-LIKE CONVERSATION):
-  1. PROSODY: Vary pitch and intonation. Use punctuation to guide the engine (e.g., "?" for rising pitch, "!" for high energy).
-  2. NATURAL PAUSING: Use "..." for brief thought pauses and "-" for sudden mid-sentence shifts in thought.
-  3. ADAPTIVE PACE: Write short, punchy sentences for excitement and longer, multi-clause sentences for complex explanations to break rhythmic monotony.
-  4. VOCAL EMBODIMENT: Include "breath words" and conversational anchors appropriate for ${langName} (e.g., "Hmm", "Well", "Actually", or language-specific ones like "Na ja", "Also", "Tja").
-  5. EMOTIONAL COLORING: Match the word choice to the sentiment—use vivid, sensory language for "bright" tones and grounded, steady vocabulary for "serious" tones.
-  6. ARTICULATION: Use natural ${langName} contractions and casual connectors to avoid the "over-enunciated" robotic feel.
-  7. INSERT DISFLUENCIES: Occasionally add natural fillers appropriate for ${langName} at the start of complex sentences to simulate real-time thinking.
-  8. STRESS CUES: Use ALL CAPS for words that need a "tonic stress".
-  9. RHYTHM CONTROL: Avoid uniform sentence lengths. Mix them up constantly.`;
+  // Build dynamic instructions
+  const chatInstructions = useMemo(() => {
+    const personaInstruction = `YOUR PERSONA:
+    - You are NOT an assistant. You are a supportive, slightly witty female peer and conversation partner.
+    - Your name is ${langName}Bean.
+    - Tone: Warm, professional, and concise. 
+    - Voice Persona: Female Human.`;
 
-  const styleInstruction = speakingStyle === 'Formal' 
-    ? `SPEAKING STYLE: FORMAL
-       - Use proper, textbook ${langName} with correct grammar and formal structures.
-       - Maintain a professional and polite tone.
-       - Focus on clarity and grammatical accuracy.`
-    : `SPEAKING STYLE: CASUAL
-       - You are the user's human best friend.
-       - Speak like a normal friend, not a textbook.
-       - Use daily, one-to-one conversational ${langName} as spoken in the street, college, school, or office.
-       - Incorporate common slang and idioms naturally.
-       - Do not stress over perfect grammar; prioritize natural flow and common slang/idioms.
-       - Keep the conversation light, silly, and informal.`;
+    const sessionContextFragment = sessionContextRef.current 
+      ? `\nSESSION MEMORY: ${sessionContextRef.current.slice(0, 500)}`
+      : "";
 
-  const baseInstruction = useMemo(() => `You are ${langName}Buddy, the user's supportive and motivating ${langName}-speaking best friend.
-  
-  ${personaInstruction}
-  
-  Your goal is to have a natural, friendly human-to-human conversation. 
-  Talk like a real friend would—casual, empathetic, and engaging. 
-  Avoid sounding like an AI, a tutor, or a language learning application.
-  
-  ${speechOptimizationRules}
-  
-  ${styleInstruction}
-  
-  CRITICAL BEHAVIOR RULES:
-  1. BE CONCISE: Keep your responses short and natural (1-2 sentences max). Real friends don't give long lectures in casual chat.
-  2. DOUBT HANDLING: If the user asks a question or expresses a doubt about the language, grammar, or a word, reply in a BRIEF, CRISP, and MEANINGFUL way with EXAMPLES. The answer must be STRAIGHT TO THE POINT.
-  3. TURN-TAKING: Only reply ONCE for every user message. Do not be overly proactive or "interfere" by talking multiple times in a row. Let the user lead the conversation.
-  4. SINGLE MESSAGE INPUT: Expect the user to speak their entire thought in one go. Do not split your understanding into multiple messages.
-  5. NATURAL TONE: Use casual ${langName}. Avoid formal structures unless appropriate for the context.
-  
-  ARCHITECTURE CHANGE: You are now part of a text-based pipeline. 
-  Your response MUST follow this exact structure for every message:
-  
-  Part 1 (The Conversation): Write your ${langName} response clearly. Do not use emojis or special symbols. This part will be read aloud by a TTS engine.
-  ---
-  Part 2 (Significant Translations): Provide a list of 2-4 significant ${langName} words used in the sentence with their English meanings. DO NOT provide a full English translation of the entire message.
-  
-  Example Response:
-  Hallo! Wie geht es dir heute? Hast du gut geschlafen?
-  ---
-  Vocabulary:
-  - heute (today)
-  - geschlafen (slept)
-  
-  CONVERSATION INITIATION PROTOCOL:
-  1. NEW CHAT / RESTART: If you receive a message like "INITIATE_CONVERSATION", start with a warm, short ${langName} welcome and a simple question.
-  2. DETECTING BREAKS: If the user says "START", "RESET", or "NEW TOPIC", provide a new, concise opening sentence.
-  
-  Current Context: ${context}
-  User's ${langName} Level: ${level}
-  
-  Guidelines:
-  1. Speak primarily in ${langName} at a level appropriate for ${level}.
-  2. Keep the conversation flowing naturally and concisely.`, [langName, personaInstruction, styleInstruction, context, level]);
+    const speechOptimizationRules = `CONVERSATIONAL RULES:
+    1. CONCISENESS: Keep responses brief (15-25 words).
+    2. FLOW: Always end your reply with a simple, open-ended question to keep the conversation moving.
+    3. HEMINGWAY STYLE: Active voice, simple but expressive.
+    4. CONTRACTIONS: Use "I'm", "Don't", "It's", etc. (Apply equivalent principles to ${langName}).
+    5. PROSODY: Use "..." for pauses. Use expressive punctuation (!!, ?, ...) to help the TTS sound natural.
+    6. HUMAN FEEL: Be polished but never robotic. ${speakingStyle === 'Casual' ? 'Use casual shortcuts common in daily speech.' : 'Maintain professional grace.'}
+    7. SPONTANEITY: Refer back to things mentioned in the SESSION MEMORY.`;
 
-  const suffixInstruction = `4. Occasionally provide a brief, friendly grammar tip in English if you notice a mistake. Provide it in the format [GRAMMAR_TIP: example - explanation_in_english].
-  5. Identify new words the user might have learned and provide them in the format [LEARNED_WORD: word - translation].
-  
-  CRITICAL: Only Part 1 (before the ---) should be in ${langName}. Part 2 (after the ---) must be in English.
-  Do not use emojis in Part 1.`;
+    const styleIns = speakingStyle === 'Formal' 
+      ? `SPEAKING STYLE: FORMAL
+         - Use proper, textbook ${langName}.
+         - Professional and polite tone.
+         - LANGUAGE RULES:
+             1. Start EVERY session strictly in ${langName}.
+             2. Use ${langName} for 95% of your speech. Only use English for 1-sentence translations if the user is totally lost.
+             3. If the user mixes languages, stay strictly in ${langName}.`
+      : `SPEAKING STYLE: CASUAL
+         - You are the user's best friend.
+         - Use daily, street-level ${langName}.
+         - Natural slang and idioms.
+         - LANGUAGE RULES:
+             1. Start EVERY session strictly in ${langName}.
+             2. Use ${langName} for 95% of your speech. Only use English briefly (1 sentence max) if requested or clearly needed.
+             3. If the user mixes languages, stay strictly in ${langName}.`;
+
+    const levelIns = level === 'A1' 
+      ? `LEVEL ${level} (BEGINNER): Use ONLY basic A1 vocabulary. Short, very simple sentences. Absolutely no complex or compound grammar.`
+      : level === 'A2' 
+      ? `LEVEL ${level} (ELEMENTARY): Use A2 vocabulary. Simple sentence connections (and, but, because).`
+      : level === 'B1'
+      ? `LEVEL ${level} (INTERMEDIATE): Standard B1 language for common daily topics and basic opinions.`
+      : level === 'B2'
+      ? `LEVEL ${level} (UPPER INTERMEDIATE): Advanced B2 vocab/idioms. Abstract topics.`
+      : `LEVEL ${level} (ADVANCED/PRO): Sophisticated vocab, complex structures, sarcasm and wit.`;
+
+    const suffixInstruction = `METADATA (MANDATORY after "---"):
+    - [TRANS: ${langName} - English] (Provide 2-3 key word translations from your reply, e.g. [TRANS: Quatsch - nonsense])
+    - [HELP_USER: English - ${langName}] (Provide 3 dynamic, context-specific starter phrases or useful sentence fragments in English, followed by their ${langName} translations. Provide EACH line inside a separately wrapped [HELP_USER: English - ${langName}] tag, one per line. E.g.:
+      [HELP_USER: I am listening to a quiet song. - Ich höre ein ruhiges Lied.]
+      [HELP_USER: That really calms me down. - Das bringt mich echt runter.]
+      [HELP_USER: I am turning on Spotify. - Ich mache jetzt Spotify an.])
+    - [LEARNED_WORD: ${langName} - English] (Highlight 1 key learned word, e.g. [LEARNED_WORD: Quatsch - nonsense])
+    - [SESSCON: Update facts about user, max 30 words]
+    
+    IMPORTANT constraints on metadata after "---":
+    1. Do NOT generate JSON curly braces or stringified dictionary lists in the metadata.
+    2. Keep any free text commentary extremely brief (maximum of 1-2 lines in total) and purely focus on presenting 1-2 key vocabulary words and their simple English translations.`;
+
+    return `
+      STRICT INSTRUCTION: YOU MUST COMMUNICATE IN ${langName} AT A ${level} PROFICIENCY LEVEL.
+      Target Language: ${langName}
+      Proficiency Level: ${level}
+      Persona Name: ${langName}Bean
+      
+      CONVERSATION FLOW:
+      - Always start in ${langName}.
+      - ${levelIns}
+      - ${styleIns}
+      - PRIMARY RULE: You are a conversation partner, not a translator. Speak 95% in ${langName}.
+      - ENGAGEMENT RULE: Every single response MUST conclude with a simple question in ${langName} to engage the user.
+      
+      PERSONA:
+      ${personaInstruction}
+      
+      CONSTRAINTS:
+      ${speechOptimizationRules}
+      
+      CONTEXT:
+      Current Conversation context: ${context}
+      User Session Facts: ${sessionContextFragment}
+
+      ARCHITECTURE: 
+      Part 1: Natural Conversation in ${langName} (At ${level} level)
+      ---
+      Part 2: Metadata tags
+      
+      ${suffixInstruction}
+      
+      FAILURE TO ADHERE TO ${langName} OR LEVEL ${level} IS A CRITICAL SYSTEM ERROR.`;
+  }, [langName, speakingStyle, context, level, responseCount]);
 
   const onTranscriptUpdateRef = useRef(onTranscriptUpdate);
   onTranscriptUpdateRef.current = onTranscriptUpdate;
@@ -127,71 +151,126 @@ export function useGeminiChat({
   }, [history]);
 
   const sendMessage = useCallback(async (text: string, silent = false) => {
-    if (isProcessing) return;
+    if (isProcessingRef.current) return;
+    isProcessingRef.current = true;
     setIsProcessing(true);
 
     try {
-      const currentHistory = text === "INITIATE_CONVERSATION" ? [] : historyRef.current;
+      const isInitiation = text === "INITIATE_CONVERSATION";
+      console.log(`[useGeminiChat] sendMessage: "${isInitiation ? 'INIT' : text}"`);
       
-      // Add user message to UI immediately if not silent
-      if (!silent) {
-        onTranscriptUpdateRef.current(text, true);
+      // 1. Proactively add user message to history so the UI reflects it immediately
+      if (!isInitiation && !silent) {
+        onTranscriptUpdateRef.current(text, true, true, false);
       }
 
-      // Construct system instruction
-      const systemInstruction = `${baseInstruction}\n${suffixInstruction}`;
+      if (isInitiation) {
+        sessionContextRef.current = "";
+        setResponseCount(0); // Full reset
+      }
+      const currentHistory = isInitiation ? [] : historyRef.current;
+      
+      // Safety: Cap the session context length and ensure it's a string
+      const rawSessionContext = String(sessionContextRef.current || "");
+      if (rawSessionContext.length > 500) {
+        sessionContextRef.current = rawSessionContext.slice(0, 500) + "...";
+      }
+      
+      // Requests are securely proxied through the server /api/ai/generateContentStream endpoint.
+      if (text === "STOP_ALL") {
+        isProcessingRef.current = false;
+        setIsProcessing(false);
+        return;
+      }
+
+      // 1. Instructions and History
+      const finalInstruction = chatInstructions || "You are a helpful conversation partner.";
+      
+      console.log(`[useGeminiChat] Sending with instructions for: Lang=${langName}, Level=${level}, HistorySize=${currentHistory.length}`);
+      
+      const safeHistory = (currentHistory || []).slice(-10).map(m => {
+        const role = m.sender === 'user' ? 'user' : 'model';
+        const textContent = (String(m.text || "").split("---")[0]).trim();
+        return {
+          role: role as any,
+          parts: [{ text: textContent || (role === 'user' ? "..." : "I'm listening.") }] 
+        };
+      });
+
+      console.log(`[useGeminiChat] Creating chat with history size: ${safeHistory.length}`);
 
       const chat = ai.chats.create({
         model: AiService.getModelName(),
         config: {
-          systemInstruction: systemInstruction,
+          systemInstruction: finalInstruction,
+          maxOutputTokens: isInitiation ? 200 : 2000
         },
-        history: currentHistory.map(m => ({
-          role: m.sender === 'user' ? 'user' : 'model',
-          parts: [{ text: m.text }]
-        }))
+        history: safeHistory
       });
 
-      const responseStream = await chat.sendMessageStream({ message: text });
-      
-      // Add a timeout for the entire stream consumption
-      const streamTimeout = setTimeout(() => {
-        if (!hasStartedConversation) {
-          console.warn("Gemini stream timed out before starting.");
-          // We don't throw here to allow the finally block to reset isProcessing
-        }
-      }, 15000);
+      const connectionTimeout = isInitiation ? 45000 : 90000;
+      const isRolePlay = scenarioId && scenarioId !== 'free-talk';
 
+      const messageText = isInitiation 
+        ? isRolePlay
+          ? `STRICT MODE: START A NEW ROLEPLAY IN ${langName}. Context: ${context}. Give a SHORT (max 12 words) spontaneous opening sentence as your persona in ${langName} now. DO NOT SPEAK ENGLISH. End with --- and your metadata.`
+          : `STRICT MODE: START A NEW CONVERSATION IN ${langName}. Level: ${level}. Greet me in ${langName} with a short, spontaneous opener (max 10 words). DO NOT SPEAK ENGLISH. End with --- and your metadata.` 
+        : text;
       let fullText = "";
       let hasStartedConversation = false;
 
-      try {
-        for await (const chunk of responseStream) {
-          const chunkText = chunk.text;
-          if (chunkText) {
-            fullText += chunkText;
-            
-            // If we are streaming the first part (before the ---), we can update the UI
-            if (!fullText.includes("---")) {
-              onTranscriptUpdateRef.current(fullText, false, false);
-              hasStartedConversation = true;
-            } else if (!hasStartedConversation) {
-              // If we just hit the separator, send the first part
-              const spokenText = fullText.split("---")[0].trim();
-              onTranscriptUpdateRef.current(spokenText, false, false);
-              hasStartedConversation = true;
-            }
+      console.log(`[Sync] Initiating Gemini message stream for ${langName}. [Init: ${isInitiation}]`);
+      const streamPromise = chat.sendMessageStream({ message: messageText });
+      const timeoutPromise = new Promise((_, reject) => 
+        setTimeout(() => reject(new Error("AI response stream timed out. Please tap retry to continue.")), connectionTimeout)
+      );
+
+      const responseStream = await Promise.race([streamPromise, timeoutPromise]) as any;
+      
+      for await (const chunk of responseStream) {
+        if (!isProcessingRef.current) break;
+
+        let chunkText = "";
+        if (chunk) {
+          if (typeof chunk.text === 'string') chunkText = chunk.text;
+          else if (typeof chunk.text === 'function') chunkText = chunk.text();
+          else chunkText = chunk.text || "";
+        }
+
+        if (chunkText) {
+          fullText += chunkText;
+          
+          if (fullText.includes("---") && !hasStartedConversation) {
+            const spokenText = fullText.split("---")[0].trim();
+            // Clean dynamic tags for initiation greeting speaking sequence
+            const cleanSpoken = isInitiation 
+              ? spokenText.replace(/\[(LEARNED_WORD|GRAMMAR_TIP|TRANS|HELP_USER):.*?\]/g, '').trim()
+              : spokenText;
+            onTranscriptUpdateRef.current(cleanSpoken, false, false, !silent);
+            hasStartedConversation = true;
+          } else if (!hasStartedConversation) {
+            onTranscriptUpdateRef.current(fullText, false, false);
           }
         }
-      } finally {
-        clearTimeout(streamTimeout);
       }
       
-      if (fullText) {
-        // Parse learned words
+      if (fullText && isProcessingRef.current) {
+        // Parse translations for underlining and tooltips (symmetric dual-direction for maximum match robustness)
+        const translations: Record<string, string> = {};
+        const transMatches = Array.from(fullText.matchAll(/\[TRANS: (.*?) - (.*?)\]/g));
+        for (const match of transMatches) {
+          const val1 = match[1].trim();
+          const val2 = match[2].trim();
+          const key1 = val1.toLowerCase().replace(/[.,!?()[\]{}:;"'‘’“”]/g, '').trim();
+          const key2 = val2.toLowerCase().replace(/[.,!?()[\]{}:;"'‘’“”]/g, '').trim();
+          if (key1) translations[key1] = val2;
+          if (key2) translations[key2] = val1;
+        }
+
+        // Parse learned words ([LEARNED_WORD: TargetLanguage - English]) -> pass (English, TargetLanguage)
         const learnedWordMatches = Array.from(fullText.matchAll(/\[LEARNED_WORD: (.*?) - (.*?)\]/g));
         for (const match of learnedWordMatches) {
-          onNewWordLearnedRef.current(match[1], match[2]);
+          onNewWordLearnedRef.current(match[2].trim(), match[1].trim());
         }
 
         // Parse grammar tips
@@ -200,20 +279,71 @@ export function useGeminiChat({
           onGrammarTipRef.current(match[1], match[2]);
         }
 
-        // Final update with the full cleaned text (to ensure everything is correct)
-        const cleanText = fullText.replace(/\[(LEARNED_WORD|GRAMMAR_TIP):.*?\]/g, '').trim();
-        onTranscriptUpdateRef.current(cleanText, false, true);
+        // Parse Session Context (Mindful memory - take the LAST one if multiple exist)
+        const sessConMatches = Array.from(fullText.matchAll(/\[SESSCON: (.*?)\]/g));
+        if (sessConMatches.length > 0) {
+          const lastMatch = sessConMatches[sessConMatches.length - 1][1];
+          sessionContextRef.current = lastMatch.trim().slice(0, 500);
+        }
+
+        // Parse suggested words for the user (The "helping words" at the bottom)
+        const suggestedWords: {word: string, translation: string}[] = [];
+        const helpUserMatches = Array.from(fullText.matchAll(/\[HELP_USER: (.*?) - (.*?)\]/g));
+        for (const match of helpUserMatches) {
+          suggestedWords.push({ 
+            word: match[1].trim(), 
+            translation: match[2].trim() 
+          });
+        }
+
+        // Final update with the full cleaned text and study notes
+        const [spoken, notes] = fullText.split("---");
+        // Robust regex to clean any bracket metadata tags ([TAG: ...]) including multi-line
+        const tagCleanupRegex = /\[[A-Z_]+:[\s\S]*?\]/g;
+        const cleanSpoken = spoken.replace(tagCleanupRegex, '').trim();
+        const cleanNotes = notes ? notes.replace(tagCleanupRegex, '').trim() : undefined;
+        const finalOutputPart = cleanSpoken + (cleanNotes ? ` --- ${cleanNotes}` : '');
+        
+        onTranscriptUpdateRef.current(finalOutputPart, false, true, !silent, translations, suggestedWords);
+        setResponseCount(prev => prev + 1);
       }
-    } catch (error) {
+    } catch (error: any) {
       console.error("Gemini Chat Error:", error);
-      throw error; // Rethrow so the UI can handle the failure
+      
+      // Better error parsing for quota limits and token limits
+      let userFriendlyMessage = error?.message || "Check connection";
+      const errorString = String(error?.message || error || "");
+      
+      if (
+        errorString.includes("out of API tokens") || 
+        errorString.includes("Gemini limits") || 
+        errorString.includes("RESOURCE_EXHAUSTED") || 
+        error?.status === "RESOURCE_EXHAUSTED" || 
+        error?.code === 429
+      ) {
+        userFriendlyMessage = "You have run out of API tokens or daily/per-minute Gemini limits to talk to Bean. Please configure/check your paid plans or credits.";
+      } else if (errorString.includes("token count exceeds") || error?.code === 400) {
+        userFriendlyMessage = "The conversation context is too large. I've reset the short-term memory to fix this.";
+        sessionContextRef.current = ""; // Emergency reset
+      }
+      
+      throw new Error(userFriendlyMessage);
     } finally {
+      isProcessingRef.current = false;
       setIsProcessing(false);
     }
-  }, [isProcessing, baseInstruction, suffixInstruction, ai]);
+  }, [ai, chatInstructions, langName, level, context, scenarioId]);
+
+  const clearSession = useCallback(() => {
+    sessionContextRef.current = "";
+    setResponseCount(0);
+    isProcessingRef.current = false;
+    setIsProcessing(false);
+  }, []);
 
   return {
     isProcessing,
-    sendMessage
+    sendMessage,
+    clearSession
   };
 }

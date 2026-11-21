@@ -1,8 +1,26 @@
 /**
  * Utility to wrap raw PCM data in a WAV header for playback in standard <audio> elements.
- * Gemini TTS returns raw PCM at 24000Hz, 16-bit, mono.
+ * Gemini TTS returns raw PCM at 24000Hz, 16-bit, mono by default.
+ * If the data already contains a RIFF header, we return it as is.
  */
 export function createWavHeader(pcmData: Uint8Array, sampleRate: number = 24000): Uint8Array {
+  // Check if it already has a WAV/RIFF header
+  if (pcmData.length > 12 && 
+      pcmData[0] === 82 && // R
+      pcmData[1] === 73 && // I
+      pcmData[2] === 70 && // F
+      pcmData[3] === 70) { // F
+    console.log('[AudioUtils] Data already has RIFF header, bypassing manual header creation.');
+    return pcmData;
+  }
+
+  // Check for MP3 header (simplified check for FF FB or ID3)
+  if ((pcmData[0] === 0xFF && (pcmData[1] & 0xE0) === 0xE0) ||
+      (pcmData[0] === 73 && pcmData[1] === 68 && pcmData[2] === 51)) {
+    console.log('[AudioUtils] Data appears to be MP3, bypassing manual WAV header creation.');
+    return pcmData;
+  }
+
   const header = new ArrayBuffer(44);
   const view = new DataView(header);
 
@@ -47,13 +65,18 @@ function writeString(view: DataView, offset: number, string: string) {
 }
 
 /**
- * Decodes base64 string to Uint8Array
+ * Decodes base64 string to Uint8Array using a robust method
  */
 export function base64ToUint8Array(base64: string): Uint8Array {
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  try {
+    const binaryString = atob(base64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes;
+  } catch (e) {
+    console.error('[AudioUtils] Failed to decode base64 audio data', e);
+    return new Uint8Array(0);
   }
-  return bytes;
 }

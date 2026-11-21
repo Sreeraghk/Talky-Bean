@@ -1,0 +1,9 @@
+{
+  "appId": "com.talkybean.app",
+  "appName": "Talky Bean",
+  "webDir": "dist",
+  "bundledWebRuntime": false,
+  "server": {
+    "androidScheme": "https"
+  }
+}

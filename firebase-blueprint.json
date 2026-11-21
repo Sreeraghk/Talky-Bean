@@ -1,0 +1,197 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "The visual user profile containing goals and custom AI generated assessment",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "email": { "type": "string" },
+        "parentId": { "type": "string" },
+        "goals": { "type": "string" },
+        "nativeLanguage": { "type": "string" },
+        "targetLanguage": { "type": "string" },
+        "age": { "type": "string" },
+        "experienceLevel": { "type": "string" },
+        "aiAssessment": { "type": "string" },
+        "lastUpdated": { "type": "number" }
+      },
+      "required": ["name", "goals"]
+    },
+    "UserSession": {
+      "title": "UserSession",
+      "description": "State tracking used to enforce single-device active session constraint at real-time",
+      "type": "object",
+      "properties": {
+        "sessionId": { "type": "string" },
+        "updatedAt": { "type": "number" },
+        "platformInfo": { "type": "string" }
+      },
+      "required": ["sessionId", "updatedAt"]
+    },
+    "DeviceTrial": {
+      "title": "DeviceTrial",
+      "description": "Absolute hardware identifiers representing trial claims used in our security firewall",
+      "type": "object",
+      "properties": {
+        "deviceId": { "type": "string" },
+        "activatedAt": { "type": "number" },
+        "expiresAt": { "type": "number" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" },
+        "platform": { "type": "string" }
+      },
+      "required": ["deviceId", "activatedAt", "expiresAt"]
+    },
+    "UserProgress": {
+      "title": "UserProgress",
+      "description": "Synchronized daily metrics logging spoken time, words learned, exercises and standard metric records",
+      "type": "object",
+      "properties": {
+        "data": { "type": "object" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["data", "updatedAt"]
+    },
+    "UserFluency": {
+      "title": "UserFluency",
+      "description": "Comprehensive native fluency benchmarks structured by speaking level",
+      "type": "object",
+      "properties": {
+        "data": { "type": "object" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["data", "updatedAt"]
+    },
+    "UserSubscription": {
+      "title": "UserSubscription",
+      "description": "Cloud verified payment subscription markers and duration mappings",
+      "type": "object",
+      "properties": {
+        "isActive": { "type": "boolean" },
+        "entitlementId": { "type": "string" },
+        "productId": { "type": "string" },
+        "platform": { "type": "string" },
+        "sandbox": { "type": "boolean" },
+        "trialUsed": { "type": "boolean" },
+        "trialExpiresAt": { "type": "number" },
+        "trialStartDate": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["isActive", "productId", "platform"]
+    },
+    "OtpRequest": {
+      "title": "OtpRequest",
+      "description": "Temporary server side codes used to carry out passwordless email signins",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "expiresAt": { "type": "number" },
+        "email": { "type": "string" }
+      },
+      "required": ["code", "expiresAt", "email"]
+    },
+    "WhitelistedUser": {
+      "title": "WhitelistedUser",
+      "description": "User whitelisted by the developer to bypass subscription checks with custom token caps",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string" },
+        "allowed": { "type": "boolean" },
+        "tokenLimit": { "type": "number" },
+        "tokenUsed": { "type": "number" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["email", "allowed", "tokenUsed"]
+    },
+    "UserRecord": {
+      "title": "UserRecord",
+      "description": "Summary metadata of registered user for system administration",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "createdAt": { "type": "number" },
+        "lastLoginAt": { "type": "number" },
+        "fileCount": { "type": "number" }
+      },
+      "required": ["uid", "email"]
+    },
+    "UserFile": {
+      "title": "UserFile",
+      "description": "Metadata of user uploaded files",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fileName": { "type": "string" },
+        "fileUrl": { "type": "string" },
+        "fileType": { "type": "string" },
+        "fileSize": { "type": "number" },
+        "uploadedAt": { "type": "number" },
+        "userId": { "type": "string" },
+        "userEmail": { "type": "string" }
+      },
+      "required": ["id", "fileName", "fileUrl", "userId"]
+    },
+    "UserPreferences": {
+      "title": "UserPreferences",
+      "description": "Synchronized Bean AI voice speed, auto-mic delay, auto-mic mode, and speaking tone preferences",
+      "type": "object",
+      "properties": {
+        "speed": { "type": "number" },
+        "autoMicOnDelay": { "type": "number" },
+        "isAutoMode": { "type": "boolean" },
+        "speakingStyle": { "type": "string" },
+        "updatedAt": { "type": "number" }
+      },
+      "required": ["speed", "autoMicOnDelay", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": "UserRecord",
+      "description": "User profile index record accessible by user and admin"
+    },
+    "/users/{userId}/files/{fileId}": {
+      "schema": "UserFile",
+      "description": "Uploaded documents and files owned by user and inspectable by admin"
+    },
+    "/dev_whitelisted_users/{email}": {
+      "schema": "WhitelistedUser",
+      "description": "Dynamic whitelist allowing designated users to enjoy premium benefits for free, with optional token caps managed by Sreeragh"
+    },
+    "/users/{userId}/settings/profile": {
+      "schema": "UserProfile",
+      "description": "Cloud backup of the student profile"
+    },
+    "/users/{userId}/settings/preferences": {
+      "schema": "UserPreferences",
+      "description": "Cloud backup of Bean AI voice speed and auto-mic delay settings"
+    },
+    "/users/{userId}/session/active": {
+      "schema": "UserSession",
+      "description": "Enforces single workstation active session constraints"
+    },
+    "/users/{userId}/stats/progress": {
+      "schema": "UserProgress",
+      "description": "Daily metrics summaries"
+    },
+    "/users/{userId}/stats/fluency": {
+      "schema": "UserFluency",
+      "description": "Fluency benchmark arrays"
+    },
+    "/users/{userId}/settings/subscription": {
+      "schema": "UserSubscription",
+      "description": "Stripe/RevenueCat premium tiers synced from local state"
+    },
+    "/otp_requests/{email}": {
+      "schema": "OtpRequest",
+      "description": "Passwordless verification tokens"
+    },
+    "/used_device_trials/{deviceId}": {
+      "schema": "DeviceTrial",
+      "description": "Ensures hardware identifiers cannot register multiple standard 1-week free trials"
+    }
+  }
+}

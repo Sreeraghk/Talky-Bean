@@ -4,8 +4,13 @@ const STORAGE_KEY = 'deutschbuddy_performance_history';
 
 export class PerformanceService {
   static getHistory(): PerformanceRecord[] {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error("Error parsing performance history:", e);
+      return [];
+    }
   }
 
   static saveHistory(history: PerformanceRecord[]) {

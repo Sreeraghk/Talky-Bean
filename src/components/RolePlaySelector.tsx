@@ -1,8 +1,10 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { RolePlayScenario } from '../types';
-import { Users, ChevronRight, Mic, Sparkles, Trash2, X, Send } from 'lucide-react';
+import { Sparkles, X, Send } from 'lucide-react';
 import { AiService } from '../services/AiService';
+import { getLanguageConfig } from '../config/languages';
+import { TalkingPartnerCard } from './TalkingPartnerCard';
 
 interface RolePlaySelectorProps {
   onSelect: (scenario: RolePlayScenario) => void;
@@ -10,9 +12,21 @@ interface RolePlaySelectorProps {
   onSaveCustom: (scenario: RolePlayScenario) => void;
   onDeleteCustom: () => void;
   scenarios: RolePlayScenario[];
+  languageCode: string;
+  user?: any;
+  onRequireLogin?: () => void;
 }
 
-export function RolePlaySelector({ onSelect, customScenario, onSaveCustom, onDeleteCustom, scenarios }: RolePlaySelectorProps) {
+export function RolePlaySelector({
+  onSelect,
+  customScenario,
+  onSaveCustom,
+  onDeleteCustom,
+  scenarios,
+  languageCode,
+  user,
+  onRequireLogin
+}: RolePlaySelectorProps) {
   const [isPlanning, setIsPlanning] = useState(false);
   const [prompt, setPrompt] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
@@ -23,173 +37,192 @@ export function RolePlaySelector({ onSelect, customScenario, onSaveCustom, onDel
 
     try {
       const ai = AiService.getClient();
+      const langName = getLanguageConfig(languageCode).name;
       const response = await ai.models.generateContent({
         model: AiService.getModelName(),
-        contents: `Create a German language practice roleplay scenario based on this description: "${prompt}". 
-        The output MUST be a JSON object with exactly these fields:
-        - title: A short, catchy name for the scenario.
-        - description: A brief summary of what happens.
-        - context: Detailed instructions for the AI persona on how to behave, what their goal is, and the setting.
-        
-        Keep the title under 30 characters and the description under 100 characters.`,
         config: {
-          responseMimeType: "application/json"
-        }
+          systemInstruction: `You are an expert ${langName} teacher. Generate roleplay scenarios as PURE JSON. Be concise but realistic. Output under 300 words.`,
+          responseMimeType: "application/json",
+          maxOutputTokens: 500,
+          responseSchema: {
+            type: "object",
+            properties: {
+              title: { type: "string" },
+              description: { type: "string" },
+              context: { type: "string" }
+            },
+            required: ["title", "description", "context"]
+          }
+        },
+        contents: [
+          { 
+            role: 'user', 
+            parts: [{ text: `Topic: ${prompt}.` }] 
+          }
+        ]
       });
 
-      const result = JSON.parse(response.text);
+      let text = response.text || "";
+      text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "").trim();
+
+      const result = JSON.parse(text);
       const newScenario: RolePlayScenario = {
         id: 'custom-' + Date.now(),
-        title: result.title,
-        description: result.description,
-        context: result.context
+        title: result.title || 'Custom Partner',
+        description: result.description || 'A custom conversational roleplay partner.',
+        context: result.context,
+        imageUrl: 'https://images.unsplash.com/photo-1516321318423-f06f85e504b3?auto=format&fit=crop&w=1200&q=80',
+        category: 'Social',
+        difficulty: 'Intermediate',
+        estimatedMinutes: 10
       };
 
       onSaveCustom(newScenario);
       setIsPlanning(false);
       setPrompt('');
     } catch (error) {
-      console.error("Failed to generate scenario:", error);
+      console.warn("Failed to generate custom scenario:", error);
       alert("Failed to generate scenario. Please try again.");
     } finally {
       setIsGenerating(false);
     }
   };
 
+  const handleCardClick = (scenario: RolePlayScenario) => {
+    if (typeof window !== 'undefined' && window.speechSynthesis) {
+      try {
+        window.speechSynthesis.resume();
+      } catch (e) {}
+    }
+    if (!user) {
+      onRequireLogin?.();
+      return;
+    }
+    onSelect(scenario);
+  };
+
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <Users className="text-orange-500" />
-          <h2 className="text-2xl font-bold">Role Play Scenarios</h2>
+    <div className="space-y-6 max-w-4xl mx-auto">
+      {/* Header section */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-left px-1">
+        <div>
+          <div className="flex items-center gap-2 mb-1.5">
+            <span className="text-[10px] font-black uppercase tracking-[0.2em] text-[#f95716] flex items-center gap-1.5">
+              <span className="inline-block w-1.5 h-1.5 rounded-full bg-[#f95716] animate-pulse" />
+              <span>TALKING PARTNERS</span>
+            </span>
+          </div>
+          <h2 className="text-2xl sm:text-3xl font-black text-text-main tracking-tight">
+            Choose a Companion
+          </h2>
+          <p className="text-xs sm:text-sm text-text-muted font-medium mt-0.5">
+            Select a companion for personalized spoken conversation practice.
+          </p>
         </div>
+
         {!customScenario && !isPlanning && (
           <button 
-            onClick={() => setIsPlanning(true)}
-            className="flex items-center gap-2 px-4 py-2 bg-orange-500/10 text-orange-500 rounded-full text-sm font-bold hover:bg-orange-500/20 transition-all"
+            onClick={() => {
+              if (!user) {
+                onRequireLogin?.();
+                return;
+              }
+              setIsPlanning(true);
+            }}
+            className="flex items-center gap-2 px-4 sm:px-5 py-2.5 bg-gradient-to-r from-[#FF7A3D] to-[#E84D1C] hover:from-[#FF8F57] hover:to-[#F25623] text-white rounded-2xl text-xs font-bold uppercase tracking-wider shadow-md hover:shadow-orange-500/20 transition-all active:scale-95 cursor-pointer self-start sm:self-auto shrink-0"
           >
-            <Sparkles size={16} />
-            Plan Your Own
+            <Sparkles size={15} />
+            <span>Plan Scenario</span>
           </button>
         )}
       </div>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {/* Predefined Scenarios */}
-        {scenarios.map((scenario) => (
-          <motion.div
-            key={scenario.id}
-            whileHover={{ scale: 1.01 }}
-            className="bg-card-soft p-6 rounded-3xl border border-app-border text-left hover:border-accent/30 transition-all group relative overflow-hidden flex flex-col justify-between"
-          >
-            <div>
-              <h3 className="text-lg font-bold text-text-main mb-2">{scenario.title}</h3>
-            </div>
-            
-            <div className="mt-6 flex items-center justify-between">
-              <span className="text-[10px] px-2 py-1 bg-orange-500/10 text-orange-500 rounded uppercase font-bold tracking-widest">
-                Practice Speaking
-              </span>
-              <button 
-                onClick={() => onSelect(scenario)}
-                className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-full shadow-lg transition-all active:scale-90"
-              >
-                <Mic size={20} />
-              </button>
-            </div>
-          </motion.div>
-        ))}
 
-        {/* Custom Scenario */}
+      {/* Cinematic Banner Cards Stack */}
+      <div className="flex flex-col gap-4 sm:gap-5">
+        {/* Custom Scenario Card (if user generated one) */}
         {customScenario && (
+          <TalkingPartnerCard
+            scenario={customScenario}
+            onSelect={handleCardClick}
+            isCustom={true}
+            onDeleteCustom={onDeleteCustom}
+          />
+        )}
+
+        {/* Predefined Talking Partner Cards */}
+        {scenarios.map((scenario) => (
+          <TalkingPartnerCard
+            key={scenario.id}
+            scenario={scenario}
+            onSelect={handleCardClick}
+          />
+        ))}
+      </div>
+
+      {/* AI Scenario Planning Modal */}
+      <AnimatePresence>
+        {isPlanning && (
           <motion.div
-            initial={{ opacity: 0, scale: 0.9 }}
-            animate={{ opacity: 1, scale: 1 }}
-            className="bg-orange-500/5 p-6 rounded-3xl border border-orange-500/30 text-left relative overflow-hidden flex flex-col justify-between"
+            initial={{ opacity: 0, scale: 0.98, y: 12 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.98, y: 12 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="bg-card-bg border-2 border-[#f95716]/40 p-6 sm:p-8 rounded-[2rem] space-y-4 shadow-2xl text-left"
           >
-            <div className="absolute top-4 right-4 flex gap-2">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xl font-black text-text-main flex items-center gap-2">
+                <Sparkles className="text-[#f95716]" size={22} />
+                Plan Your Custom Conversation Partner
+              </h3>
               <button 
-                onClick={onDeleteCustom}
-                className="p-2 bg-red-500/10 text-red-500 rounded-full hover:bg-red-500/20 transition-all"
-                title="Delete custom scenario"
+                onClick={() => setIsPlanning(false)} 
+                className="text-text-muted hover:text-text-main p-1.5 rounded-full hover:bg-card-soft transition-colors cursor-pointer"
               >
-                <Trash2 size={16} />
+                <X size={20} />
               </button>
             </div>
-            <div>
-              <div className="flex items-center gap-2 mb-2">
-                <Sparkles size={16} className="text-accent" />
-                <h3 className="text-lg font-bold text-text-main">{customScenario.title}</h3>
+            <p className="text-xs sm:text-sm text-text-muted font-medium">
+              Describe your scenario: the setting, who the AI should play, and your conversation goal.
+            </p>
+            <div className="relative">
+              <textarea 
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value.slice(0, 1000))}
+                placeholder="e.g. I am ordering street food at a night market in Tokyo. The vendor speaks friendly Japanese and recommends seasonal specialties..."
+                className="w-full bg-input-bg border border-app-border rounded-2xl p-4 text-sm min-h-[120px] focus:border-[#f95716]/60 outline-none transition-all resize-none font-medium"
+              />
+              <div className="absolute bottom-3 right-3 text-[10px] text-text-subtle font-mono">
+                {prompt.length}/1000
               </div>
             </div>
-            
-            <div className="mt-6 flex items-center justify-between">
-              <span className="text-[10px] px-2 py-1 bg-orange-500/20 text-orange-500 rounded uppercase font-bold tracking-widest">
-                Your Custom Scenario
-              </span>
-              <button 
-                onClick={() => onSelect(customScenario)}
-                className="p-3 bg-orange-500 hover:bg-orange-600 text-white rounded-full shadow-lg transition-all active:scale-90"
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={() => setIsPlanning(false)}
+                className="px-5 py-2.5 text-xs font-extrabold text-text-muted hover:text-text-main transition-colors cursor-pointer"
               >
-                <Mic size={20} />
+                Cancel
+              </button>
+              <button 
+                onClick={handleGenerateScenario}
+                disabled={!prompt.trim() || isGenerating}
+                className="px-6 py-3 bg-[#f95716] hover:bg-[#d8481b] text-white rounded-2xl font-black text-xs uppercase tracking-wider flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md cursor-pointer active:scale-95"
+              >
+                {isGenerating ? (
+                  <div className="flex items-center gap-2">
+                    <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                    <span>Generating...</span>
+                  </div>
+                ) : (
+                  <>
+                    <Send size={15} />
+                    <span>Generate Scenario</span>
+                  </>
+                )}
               </button>
             </div>
           </motion.div>
         )}
-
-        {/* Planning UI */}
-        <AnimatePresence>
-          {isPlanning && (
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 20 }}
-              className="col-span-1 md:col-span-2 bg-card-bg border border-accent/30 p-6 rounded-3xl space-y-4"
-            >
-              <div className="flex items-center justify-between">
-                <h3 className="text-lg font-bold flex items-center gap-2">
-                  <Sparkles className="text-accent" size={20} />
-                  Plan Your Custom Scenario
-                </h3>
-                <button onClick={() => setIsPlanning(false)} className="text-text-muted hover:text-text-main">
-                  <X size={20} />
-                </button>
-              </div>
-              <p className="text-xs text-text-subtle">Describe the situation, who the AI should be, and what your goal is (up to 250 words).</p>
-              <div className="relative">
-                <textarea 
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value.slice(0, 1000))} // Roughly 250 words
-                  placeholder="e.g. I am at a train station in Berlin and I lost my ticket. The AI is a helpful but strict station officer..."
-                  className="w-full bg-input-bg border border-app-border rounded-2xl p-4 text-sm min-h-[120px] focus:border-accent/50 outline-none transition-all resize-none"
-                />
-                <div className="absolute bottom-3 right-3 text-[10px] text-text-subtle font-mono">
-                  {prompt.length}/1000
-                </div>
-              </div>
-              <div className="flex justify-end">
-                <button 
-                  onClick={handleGenerateScenario}
-                  disabled={!prompt.trim() || isGenerating}
-                  className="px-6 py-3 bg-accent text-white rounded-xl font-bold flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-accent-hover transition-all"
-                >
-                  {isGenerating ? (
-                    <>
-                      <div className="w-4 h-4 border-2 border-white/30 border-t-text-main rounded-full animate-spin" />
-                      Generating...
-                    </>
-                  ) : (
-                    <>
-                      <Send size={18} />
-                      Generate Scenario
-                    </>
-                  )}
-                </button>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
+      </AnimatePresence>
     </div>
   );
 }

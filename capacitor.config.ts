@@ -1,8 +1,8 @@
 import { CapacitorConfig } from '@capacitor/cli';
 
 const config: CapacitorConfig = {
-  appId: 'com.deutschbuddy.app',
-  appName: 'DeutschBuddy',
+  appId: 'com.talkybean.app',
+  appName: 'Talky Bean',
   webDir: 'dist',
   server: {
     androidScheme: 'https'
