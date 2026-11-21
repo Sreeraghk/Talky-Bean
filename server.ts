@@ -6,9 +6,10 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import { setGlobalDispatcher, Agent } from "undici";
 import { initializeApp as initAdminApp, getApps as getAdminApps } from "firebase-admin/app";
-import { getFirestore as getAdminFirestore, Firestore as AdminFirestore } from "firebase-admin/firestore";
+import { getFirestore as getAdminFirestore, Firestore as AdminFirestore, FieldValue } from "firebase-admin/firestore";
 import { getAuth as getAdminAuth, Auth as AdminAuth } from "firebase-admin/auth";
 import { getStorage as getAdminStorage } from "firebase-admin/storage";
+import rateLimit from "express-rate-limit";
 
 // Initialize Firebase Admin SDK for Cloud Run / Server-side Firestore provisioning and ID-token verification
 let adminDb: AdminFirestore | null = null;
@@ -72,6 +73,77 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
+  // Trust reverse proxy hop(s) (Cloud Run / Render / Nginx) so express-rate-limit resolves real client IPs safely
+  const parsedProxyHops = parseInt(process.env.TRUST_PROXY_HOPS || "1", 10);
+  app.set("trust proxy", Number.isFinite(parsedProxyHops) && parsedProxyHops >= 0 ? parsedProxyHops : 1);
+
+  // =========================================================================
+  // EXPRESS-RATE-LIMIT MIDDLEWARE TIERS (CodeQL js/missing-rate-limiting)
+  // =========================================================================
+  const createJsonLimitHandler = (message: string, code = "RATE_LIMITED") => (
+    _req: express.Request,
+    res: express.Response
+  ) => {
+    const retryAfterHeader = res.getHeader("Retry-After");
+    const retryAfter = typeof retryAfterHeader === "string"
+      ? parseInt(retryAfterHeader, 10)
+      : typeof retryAfterHeader === "number"
+      ? retryAfterHeader
+      : 60;
+    return res.status(429).json({
+      error: message,
+      code,
+      retryAfter: Number.isFinite(retryAfter) ? retryAfter : 60,
+      resetAt: new Date(Date.now() + (Number.isFinite(retryAfter) ? retryAfter : 60) * 1000).toISOString(),
+      status: 429
+    });
+  };
+
+  // Tier 1: Generous limiter for static/SPA catch-all filesystem routes (res.sendFile)
+  const spaStaticLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 240,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: "Too many page requests from this IP. Please try again in a moment."
+  });
+
+  // Tier 2: Standard limiter for general authenticated/DB API routes
+  const standardApiLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 90,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: createJsonLimitHandler("Too many API requests. Please wait a moment before trying again.")
+  });
+
+  // Tier 3: Strict limiter for sensitive account, checkout, complaint write, and verification endpoints
+  const strictAuthWriteLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: createJsonLimitHandler("Too many sensitive requests from this IP. Please wait a few minutes before retrying.")
+  });
+
+  // Tier 4: Dedicated limiter for server-to-server payment webhooks
+  const webhookLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 120,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: createJsonLimitHandler("Webhook rate limit exceeded.", "WEBHOOK_RATE_LIMITED")
+  });
+
+  // Tier 5: Dedicated limiter for expensive Gemini AI proxy routes
+  const aiEndpointLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    limit: 40,
+    standardHeaders: true,
+    legacyHeaders: false,
+    handler: createJsonLimitHandler("Too many AI requests from this IP address. Please wait a minute before trying again.", "AI_RATE_LIMITED")
+  });
+
   // HTTP Security Headers
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
@@ -90,7 +162,7 @@ async function startServer() {
     }
   }));
 
-  // In-memory sliding-window rate limiters (IP and User based)
+  // Supplementary per-UID sliding-window rate limiters (layered on top of express-rate-limit IP middleware)
   const rateLimitMap = new Map<string, { count: number; resetTime: number }>();
   function checkRateLimit(key: string, maxRequests = 40, windowMs = 60000): boolean {
     const now = Date.now();
@@ -240,7 +312,7 @@ async function startServer() {
   }
 
   // Health check endpoint
-  app.get("/api/health", (req, res) => {
+  app.get("/api/health", standardApiLimiter, (req, res) => {
     res.json({ status: "ok" });
   });
 
@@ -249,7 +321,7 @@ async function startServer() {
   // =========================================================================
 
   // 1. Create Checkout Session (Server-Only execution)
-  app.post("/api/payments/dodo/checkout", async (req, res) => {
+  app.post("/api/payments/dodo/checkout", strictAuthWriteLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!authUser) {
@@ -320,7 +392,7 @@ async function startServer() {
         
         // Log transaction intent for GST & statutory audit
         auditLogStore.push({
-          id: `aud_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+          id: `aud_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
           eventType: 'checkout.session_created',
           userId: authUser.uid,
           amount: productMetadata.amount_inr,
@@ -347,7 +419,7 @@ async function startServer() {
   });
 
   // 2. Cryptographic Webhook Endpoint (MEASURE 2)
-  app.post("/api/payments/dodo/webhook", async (req: any, res) => {
+  app.post("/api/payments/dodo/webhook", webhookLimiter, async (req: any, res) => {
     try {
       const webhookSecret = process.env.DODO_PAYMENTS_WEBHOOK_SECRET;
       const signatureHeader = req.headers["x-dodo-signature"] || req.headers["webhook-signature"] || req.headers["x-signature"];
@@ -450,7 +522,7 @@ async function startServer() {
   });
 
   // 3. Server-verified Subscription Status Endpoint
-  app.get("/api/payments/subscription-status", async (req, res) => {
+  app.get("/api/payments/subscription-status", standardApiLimiter, async (req, res) => {
     const authUser = await verifyAuthUser(req);
     if (!authUser) {
       return res.status(401).json({ error: "Unauthorized: Valid Firebase authentication required." });
@@ -538,7 +610,7 @@ async function startServer() {
   // =========================================================================
   // ACCOUNT DELETION ENDPOINT (Apple Guideline 5.1.1(v) & Google Play Compliance)
   // =========================================================================
-  app.post("/api/user/delete-account", async (req, res) => {
+  app.post("/api/user/delete-account", strictAuthWriteLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!authUser) {
@@ -654,7 +726,7 @@ async function startServer() {
   // =========================================================================
   // ADULT ELIGIBILITY (18+) CONFIRMATION ENDPOINT
   // =========================================================================
-  app.post("/api/user/confirm-age", async (req, res) => {
+  app.post("/api/user/confirm-age", standardApiLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!authUser) {
@@ -691,7 +763,7 @@ async function startServer() {
   // =========================================================================
 
   // 1. Submit a complaint ticket (Authenticated Customer)
-  app.post("/api/complaints", async (req, res) => {
+  app.post("/api/complaints", strictAuthWriteLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!authUser) {
@@ -772,7 +844,7 @@ async function startServer() {
   });
 
   // 2. Get customer's own tickets (Authenticated Customer)
-  app.get("/api/complaints/my", async (req, res) => {
+  app.get("/api/complaints/my", standardApiLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!authUser) {
@@ -805,7 +877,7 @@ async function startServer() {
   });
 
   // 3. Customer follow-up message (Authenticated Customer)
-  app.post("/api/complaints/:id/message", async (req, res) => {
+  app.post("/api/complaints/:id/message", standardApiLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!authUser) {
@@ -838,7 +910,7 @@ async function startServer() {
       }
 
       const newMessage = {
-        id: `msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: `msg_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
         sender: 'customer',
         senderName: authUser.email ? authUser.email.split('@')[0] : 'Learner',
         text: text.trim(),
@@ -866,7 +938,7 @@ async function startServer() {
   });
 
   // 4. Admin fetch all complaints (Admin Only)
-  app.get("/api/admin/complaints", async (req, res) => {
+  app.get("/api/admin/complaints", standardApiLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!isServerAdmin(authUser)) {
@@ -903,7 +975,7 @@ async function startServer() {
   });
 
   // 5. Admin update complaint / respond / internal note (Admin Only)
-  app.post("/api/admin/complaints/:id/update", async (req, res) => {
+  app.post("/api/admin/complaints/:id/update", standardApiLimiter, async (req, res) => {
     try {
       const authUser = await verifyAuthUser(req);
       if (!isServerAdmin(authUser)) {
@@ -933,7 +1005,7 @@ async function startServer() {
 
       if (adminResponseText && typeof adminResponseText === 'string' && adminResponseText.trim().length > 0) {
         const responseMsg = {
-          id: `adm_msg_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          id: `adm_msg_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
           sender: 'support',
           senderName: 'Talky Bean Support',
           text: adminResponseText.trim(),
@@ -947,7 +1019,7 @@ async function startServer() {
 
       if (internalNoteText && typeof internalNoteText === 'string' && internalNoteText.trim().length > 0) {
         const newNote = {
-          id: `note_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+          id: `note_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
           adminEmail: authUser?.email || 'admin',
           note: internalNoteText.trim(),
           timestamp: Date.now()
@@ -966,7 +1038,7 @@ async function startServer() {
   });
 
   // 4. Native Store Receipt Verification Endpoint (HARDENED - NO UNVERIFIED PRO GRANTS)
-  app.post("/api/payments/native-verify", async (req, res) => {
+  app.post("/api/payments/native-verify", strictAuthWriteLimiter, async (req, res) => {
     const authUser = await verifyAuthUser(req);
     if (!authUser) {
       return res.status(401).json({ error: "Unauthorized: Valid Firebase authentication required." });
@@ -983,7 +1055,7 @@ async function startServer() {
   });
 
   // 5. RevenueCat Server Webhook Endpoint (Native Store Lifecycle Synchronization)
-  app.post("/api/payments/revenuecat/webhook", async (req: any, res) => {
+  app.post("/api/payments/revenuecat/webhook", webhookLimiter, async (req: any, res) => {
     try {
       const authHeader = req.headers["authorization"] || req.headers["x-revenuecat-token"];
       const webhookAuthToken = process.env.REVENUECAT_WEBHOOK_AUTH_TOKEN;
@@ -1102,7 +1174,7 @@ async function startServer() {
 
       // Record audit entry
       auditLogStore.unshift({
-        id: `rc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: `rc_${Date.now()}_${crypto.randomBytes(3).toString("hex")}`,
         timestamp: Date.now(),
         userId: appUserId,
         eventType: `revenuecat.${eventType.toLowerCase()}`,
@@ -1121,7 +1193,7 @@ async function startServer() {
   });
 
   // 5. Compliance Report Endpoint (PROGA 2025 & Statutory Audit)
-  app.get("/api/payments/compliance-report", (_req, res) => {
+  app.get("/api/payments/compliance-report", standardApiLimiter, (_req, res) => {
     res.json({
       platform: "Talky Bean Language Learning Platform",
       complianceFrameworks: [
@@ -1240,7 +1312,7 @@ async function startServer() {
   const geminiCircuitBreaker = new GeminiCircuitBreaker();
 
   // Diagnostic Circuit Breaker Status Endpoint
-  app.get("/api/ai/circuit-breaker-status", (_req, res) => {
+  app.get("/api/ai/circuit-breaker-status", standardApiLimiter, (_req, res) => {
     res.json({
       status: "ok",
       circuitBreaker: geminiCircuitBreaker.getState(),
@@ -1357,7 +1429,7 @@ async function startServer() {
   const modelReachabilityRegistry = new ModelReachabilityRegistry();
 
   // Diagnostic Model Reachability Status Endpoint
-  app.get("/api/ai/model-reachability-status", (_req, res) => {
+  app.get("/api/ai/model-reachability-status", standardApiLimiter, (_req, res) => {
     res.json({
       status: "ok",
       models: modelReachabilityRegistry.getAllStatuses(),
@@ -1549,9 +1621,520 @@ async function startServer() {
   }
 
   // =========================================================================
+  // GENEROUS YET BANKRUPTCY-PROOF AI TOKEN BUDGET & SPEND-CAP SYSTEM
+  // =========================================================================
+  const parsePositiveIntEnv = (envName: string, fallback: number): number => {
+    const raw = process.env[envName];
+    if (!raw) return fallback;
+    const parsed = parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  };
+
+  const AI_TOKEN_CONFIG = {
+    // Global bankruptcy-proof kill switch across ALL users + guests combined
+    maxDailyGlobalTokens: parsePositiveIntEnv("MAX_DAILY_GLOBAL_TOKENS", 5_000_000),
+    maxMonthlyGlobalTokens: parsePositiveIntEnv("MAX_MONTHLY_GLOBAL_TOKENS", 80_000_000),
+
+    // Authenticated learner allowances (generous for heavy daily language practice)
+    userDailyTokens: parsePositiveIntEnv("AI_USER_DAILY_TOKEN_LIMIT", 250_000),
+    userMonthlyTokens: parsePositiveIntEnv("AI_USER_MONTHLY_TOKEN_LIMIT", 4_000_000),
+    userWindowTokens: parsePositiveIntEnv("AI_USER_WINDOW_TOKEN_LIMIT", 45_000),
+    adminDailyTokens: parsePositiveIntEnv("AI_ADMIN_DAILY_TOKEN_LIMIT", 1_000_000),
+
+    // Unauthenticated guest allowances (tight per-IP caps)
+    guestDailyTokens: parsePositiveIntEnv("AI_GUEST_DAILY_TOKEN_LIMIT", 30_000),
+    guestMonthlyTokens: parsePositiveIntEnv("AI_GUEST_MONTHLY_TOKEN_LIMIT", 150_000),
+    guestWindowTokens: parsePositiveIntEnv("AI_GUEST_WINDOW_TOKEN_LIMIT", 12_000),
+    guestDailyRequests: parsePositiveIntEnv("AI_GUEST_DAILY_REQUEST_LIMIT", 40),
+
+    // Per-request input & output token guardrails
+    maxInputTokensUser: parsePositiveIntEnv("AI_MAX_INPUT_TOKENS_USER", 24_000),
+    maxInputTokensGuest: parsePositiveIntEnv("AI_MAX_INPUT_TOKENS_GUEST", 8_000),
+    maxOutputTokensStandard: parsePositiveIntEnv("AI_MAX_OUTPUT_TOKENS_STANDARD", 4_096),
+    maxOutputTokensLongForm: parsePositiveIntEnv("AI_MAX_OUTPUT_TOKENS_LONG_FORM", 8_192),
+    maxOutputTokensGuest: parsePositiveIntEnv("AI_MAX_OUTPUT_TOKENS_GUEST", 2_048),
+
+    // Sliding burst window duration (5 minutes)
+    windowMs: 5 * 60 * 1000,
+    firestoreSyncTtlMs: 60 * 1000
+  };
+
+  interface TokenActor {
+    type: "user" | "guest";
+    actorId: string; // Firestore-safe hashed IP for guests or uid for users
+    isAdmin: boolean;
+  }
+
+  interface TokenQuotaSnapshot {
+    dailyUsed: number;
+    dailyLimit: number;
+    dailyRemaining: number;
+    monthlyUsed: number;
+    monthlyLimit: number;
+    monthlyRemaining: number;
+    windowUsed: number;
+    windowLimit: number;
+    dailyResetAt: string;
+    monthlyResetAt: string;
+  }
+
+  interface BudgetCheckResult {
+    allowed: boolean;
+    error?: string;
+    scope?: string;
+    retryAfterSeconds?: number;
+    resetAt?: string;
+    quota: TokenQuotaSnapshot;
+  }
+
+  interface UsageRecordCache {
+    tokens: number;
+    requests: number;
+    lastSyncedAt: number;
+  }
+
+  const TOKEN_USAGE_COLLECTION = "server_ai_token_usage";
+
+  class AiTokenBudgetManager {
+    private counterCache = new Map<string, UsageRecordCache>();
+    private slidingWindowMap = new Map<string, Array<{ ts: number; tokens: number }>>();
+
+    private getUtcDayKey(now = new Date()): string {
+      return now.toISOString().slice(0, 10); // YYYY-MM-DD
+    }
+
+    private getUtcMonthKey(now = new Date()): string {
+      return now.toISOString().slice(0, 7); // YYYY-MM
+    }
+
+    private getNextUtcDayResetMs(now = new Date()): number {
+      return Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1, 0, 0, 0);
+    }
+
+    private getNextUtcMonthResetMs(now = new Date()): number {
+      return Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 1, 0, 0, 0);
+    }
+
+    public buildActor(authUser: { uid: string; email?: string } | null, clientIp: string): TokenActor {
+      if (authUser?.uid) {
+        return {
+          type: "user",
+          actorId: `u_${authUser.uid}`,
+          isAdmin: isServerAdmin(authUser)
+        };
+      }
+      const hashedIp = crypto.createHash("sha256").update(clientIp || "unknown_ip").digest("hex").slice(0, 20);
+      return {
+        type: "guest",
+        actorId: `g_${hashedIp}`,
+        isAdmin: false
+      };
+    }
+
+    public estimatePayloadTokens(contents: any, config?: any): number {
+      let totalChars = 0;
+      const accumulate = (node: any) => {
+        if (!node) return;
+        if (typeof node === "string") {
+          totalChars += node.length;
+        } else if (Array.isArray(node)) {
+          for (const item of node) accumulate(item);
+        } else if (typeof node === "object") {
+          if (typeof node.text === "string") totalChars += node.text.length;
+          if (Array.isArray(node.parts)) accumulate(node.parts);
+          if (node.inlineData?.data && typeof node.inlineData.data === "string") {
+            // Base64 media payloads consume roughly 1 token per ~300 base64 chars (minimum 256)
+            totalChars += Math.max(900, Math.ceil(node.inlineData.data.length / 80));
+          }
+        }
+      };
+      accumulate(contents);
+      if (config?.systemInstruction) {
+        accumulate(config.systemInstruction);
+      }
+      // Conservative 3.5 chars/token accounts cleanly for multilingual & CJK prompts
+      return Math.max(1, Math.ceil(totalChars / 3.5));
+    }
+
+    public clampOutputConfig(config: any, actor: TokenActor, isLongFormTask: boolean): any {
+      const cap = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.maxOutputTokensGuest
+        : isLongFormTask
+        ? AI_TOKEN_CONFIG.maxOutputTokensLongForm
+        : AI_TOKEN_CONFIG.maxOutputTokensStandard;
+
+      const safeConfig = config && typeof config === "object" ? { ...config } : {};
+      const requested = typeof safeConfig.maxOutputTokens === "number" && Number.isFinite(safeConfig.maxOutputTokens) && safeConfig.maxOutputTokens > 0
+        ? Math.floor(safeConfig.maxOutputTokens)
+        : cap;
+
+      safeConfig.maxOutputTokens = Math.min(requested, cap);
+      return safeConfig;
+    }
+
+    public extractActualTokenUsage(
+      usageMetadata: any,
+      estimatedInputTokens: number,
+      outputText: string
+    ): { promptTokens: number; outputTokens: number; totalTokens: number } {
+      const promptTokens = typeof usageMetadata?.promptTokenCount === "number" && usageMetadata.promptTokenCount > 0
+        ? Math.floor(usageMetadata.promptTokenCount)
+        : estimatedInputTokens;
+      const candidateTokens = typeof usageMetadata?.candidatesTokenCount === "number" && usageMetadata.candidatesTokenCount >= 0
+        ? Math.floor(usageMetadata.candidatesTokenCount)
+        : Math.ceil((outputText || "").length / 3.5);
+      const thoughtsTokens = typeof usageMetadata?.thoughtsTokenCount === "number" && usageMetadata.thoughtsTokenCount > 0
+        ? Math.floor(usageMetadata.thoughtsTokenCount)
+        : 0;
+      const outputTokens = candidateTokens + thoughtsTokens;
+      const reportedTotal = typeof usageMetadata?.totalTokenCount === "number" && usageMetadata.totalTokenCount > 0
+        ? Math.floor(usageMetadata.totalTokenCount)
+        : 0;
+      const totalTokens = Math.max(1, reportedTotal || (promptTokens + outputTokens));
+      return { promptTokens, outputTokens, totalTokens };
+    }
+
+    private getWindowUsage(actorId: string, nowMs = Date.now()): { tokens: number; oldestTs: number | null } {
+      const entries = this.slidingWindowMap.get(actorId);
+      if (!entries || entries.length === 0) return { tokens: 0, oldestTs: null };
+      const cutoff = nowMs - AI_TOKEN_CONFIG.windowMs;
+      const active = entries.filter(e => e.ts > cutoff);
+      if (active.length === 0) {
+        this.slidingWindowMap.delete(actorId);
+        return { tokens: 0, oldestTs: null };
+      }
+      this.slidingWindowMap.set(actorId, active);
+      const tokens = active.reduce((sum, item) => sum + item.tokens, 0);
+      return { tokens, oldestTs: active[0].ts };
+    }
+
+    private recordWindowUsage(actorId: string, tokens: number, nowMs = Date.now()) {
+      const cutoff = nowMs - AI_TOKEN_CONFIG.windowMs;
+      const existing = (this.slidingWindowMap.get(actorId) || []).filter(e => e.ts > cutoff);
+      existing.push({ ts: nowMs, tokens });
+      this.slidingWindowMap.set(actorId, existing);
+    }
+
+    private async getCounter(docId: string): Promise<UsageRecordCache> {
+      const now = Date.now();
+      const cached = this.counterCache.get(docId);
+      if (cached && now - cached.lastSyncedAt < AI_TOKEN_CONFIG.firestoreSyncTtlMs) {
+        return cached;
+      }
+
+      if (adminDb) {
+        try {
+          const snap = await adminDb.collection(TOKEN_USAGE_COLLECTION).doc(docId).get();
+          if (snap.exists) {
+            const data = snap.data() || {};
+            const remoteTokens = typeof data.tokens === "number" ? data.tokens : 0;
+            const remoteRequests = typeof data.requests === "number" ? data.requests : 0;
+            const merged: UsageRecordCache = {
+              tokens: Math.max(cached?.tokens || 0, remoteTokens),
+              requests: Math.max(cached?.requests || 0, remoteRequests),
+              lastSyncedAt: now
+            };
+            this.counterCache.set(docId, merged);
+            return merged;
+          }
+        } catch (err: any) {
+          console.warn(`[TokenBudget] Firestore read fallback for ${docId}:`, err?.message || err);
+        }
+      }
+
+      const fallback: UsageRecordCache = cached
+        ? { ...cached, lastSyncedAt: now }
+        : { tokens: 0, requests: 0, lastSyncedAt: now };
+      this.counterCache.set(docId, fallback);
+      return fallback;
+    }
+
+    private incrementCounter(docId: string, tokenDelta: number, requestDelta: number, periodType: "day" | "month", actorType: "user" | "guest" | "global") {
+      const now = Date.now();
+      const prev = this.counterCache.get(docId) || { tokens: 0, requests: 0, lastSyncedAt: now };
+      this.counterCache.set(docId, {
+        tokens: prev.tokens + tokenDelta,
+        requests: prev.requests + requestDelta,
+        lastSyncedAt: prev.lastSyncedAt
+      });
+
+      if (adminDb) {
+        adminDb.collection(TOKEN_USAGE_COLLECTION).doc(docId).set({
+          tokens: FieldValue.increment(tokenDelta),
+          requests: FieldValue.increment(requestDelta),
+          periodType,
+          actorType,
+          updatedAt: now
+        }, { merge: true }).catch((err: any) => {
+          console.warn(`[TokenBudget] Non-fatal Firestore write notice for ${docId}:`, err?.message || err);
+        });
+      }
+    }
+
+    public async getQuotaSnapshot(actor: TokenActor): Promise<TokenQuotaSnapshot> {
+      const now = new Date();
+      const dayKey = this.getUtcDayKey(now);
+      const monthKey = this.getUtcMonthKey(now);
+
+      const [actorDaily, actorMonthly] = await Promise.all([
+        this.getCounter(`${actor.actorId}_day_${dayKey}`),
+        this.getCounter(`${actor.actorId}_month_${monthKey}`)
+      ]);
+
+      const dailyLimit = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.guestDailyTokens
+        : actor.isAdmin
+        ? AI_TOKEN_CONFIG.adminDailyTokens
+        : AI_TOKEN_CONFIG.userDailyTokens;
+
+      const monthlyLimit = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.guestMonthlyTokens
+        : AI_TOKEN_CONFIG.userMonthlyTokens;
+
+      const windowLimit = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.guestWindowTokens
+        : AI_TOKEN_CONFIG.userWindowTokens;
+
+      const windowStats = this.getWindowUsage(actor.actorId, now.getTime());
+
+      return {
+        dailyUsed: actorDaily.tokens,
+        dailyLimit,
+        dailyRemaining: Math.max(0, dailyLimit - actorDaily.tokens),
+        monthlyUsed: actorMonthly.tokens,
+        monthlyLimit,
+        monthlyRemaining: Math.max(0, monthlyLimit - actorMonthly.tokens),
+        windowUsed: windowStats.tokens,
+        windowLimit,
+        dailyResetAt: new Date(this.getNextUtcDayResetMs(now)).toISOString(),
+        monthlyResetAt: new Date(this.getNextUtcMonthResetMs(now)).toISOString()
+      };
+    }
+
+    public async checkBudget(actor: TokenActor, estimatedInputTokens: number): Promise<BudgetCheckResult> {
+      const now = new Date();
+      const nowMs = now.getTime();
+      const dayKey = this.getUtcDayKey(now);
+      const monthKey = this.getUtcMonthKey(now);
+      const nextDayResetMs = this.getNextUtcDayResetMs(now);
+      const nextMonthResetMs = this.getNextUtcMonthResetMs(now);
+
+      const [globalDaily, globalMonthly, actorDaily, actorMonthly] = await Promise.all([
+        this.getCounter(`global_day_${dayKey}`),
+        this.getCounter(`global_month_${monthKey}`),
+        this.getCounter(`${actor.actorId}_day_${dayKey}`),
+        this.getCounter(`${actor.actorId}_month_${monthKey}`)
+      ]);
+
+      const dailyLimit = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.guestDailyTokens
+        : actor.isAdmin
+        ? AI_TOKEN_CONFIG.adminDailyTokens
+        : AI_TOKEN_CONFIG.userDailyTokens;
+
+      const monthlyLimit = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.guestMonthlyTokens
+        : AI_TOKEN_CONFIG.userMonthlyTokens;
+
+      const windowLimit = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.guestWindowTokens
+        : AI_TOKEN_CONFIG.userWindowTokens;
+
+      const maxInput = actor.type === "guest"
+        ? AI_TOKEN_CONFIG.maxInputTokensGuest
+        : AI_TOKEN_CONFIG.maxInputTokensUser;
+
+      const windowStats = this.getWindowUsage(actor.actorId, nowMs);
+
+      const quota: TokenQuotaSnapshot = {
+        dailyUsed: actorDaily.tokens,
+        dailyLimit,
+        dailyRemaining: Math.max(0, dailyLimit - actorDaily.tokens),
+        monthlyUsed: actorMonthly.tokens,
+        monthlyLimit,
+        monthlyRemaining: Math.max(0, monthlyLimit - actorMonthly.tokens),
+        windowUsed: windowStats.tokens,
+        windowLimit,
+        dailyResetAt: new Date(nextDayResetMs).toISOString(),
+        monthlyResetAt: new Date(nextMonthResetMs).toISOString()
+      };
+
+      // 1. Per-request prompt ceiling (prevents giant single-call attacks)
+      if (estimatedInputTokens > maxInput) {
+        return {
+          allowed: false,
+          scope: "request_input_limit",
+          retryAfterSeconds: 5,
+          resetAt: new Date(nowMs + 5000).toISOString(),
+          error: `This AI request is too large (~${estimatedInputTokens.toLocaleString()} input tokens, max ${maxInput.toLocaleString()}). Please shorten your prompt or sign in for higher limits.`,
+          quota
+        };
+      }
+
+      // 2. Global bankruptcy-proof daily & monthly kill switch
+      if (globalDaily.tokens + estimatedInputTokens > AI_TOKEN_CONFIG.maxDailyGlobalTokens) {
+        const retryAfterSeconds = Math.max(60, Math.ceil((nextDayResetMs - nowMs) / 1000));
+        console.warn(`[TokenBudget KILL SWITCH] Global daily cap reached (${globalDaily.tokens.toLocaleString()}/${AI_TOKEN_CONFIG.maxDailyGlobalTokens.toLocaleString()}).`);
+        return {
+          allowed: false,
+          scope: "global_daily",
+          retryAfterSeconds,
+          resetAt: new Date(nextDayResetMs).toISOString(),
+          error: "Talky Bean has reached its daily server-wide AI capacity safeguard. Live AI generation will resume automatically at 00:00 UTC.",
+          quota
+        };
+      }
+
+      if (globalMonthly.tokens + estimatedInputTokens > AI_TOKEN_CONFIG.maxMonthlyGlobalTokens) {
+        const retryAfterSeconds = Math.max(300, Math.ceil((nextMonthResetMs - nowMs) / 1000));
+        console.warn(`[TokenBudget KILL SWITCH] Global monthly cap reached (${globalMonthly.tokens.toLocaleString()}/${AI_TOKEN_CONFIG.maxMonthlyGlobalTokens.toLocaleString()}).`);
+        return {
+          allowed: false,
+          scope: "global_monthly",
+          retryAfterSeconds,
+          resetAt: new Date(nextMonthResetMs).toISOString(),
+          error: "Talky Bean has reached its monthly server-wide AI capacity safeguard. Please try again after the monthly reset.",
+          quota
+        };
+      }
+
+      // 3. Guest daily request count guardrail
+      if (actor.type === "guest" && actorDaily.requests >= AI_TOKEN_CONFIG.guestDailyRequests) {
+        const retryAfterSeconds = Math.max(60, Math.ceil((nextDayResetMs - nowMs) / 1000));
+        return {
+          allowed: false,
+          scope: "guest_daily_requests",
+          retryAfterSeconds,
+          resetAt: new Date(nextDayResetMs).toISOString(),
+          error: `Guest daily AI request allowance (${AI_TOKEN_CONFIG.guestDailyRequests} requests/day) reached. Sign in for a much higher daily allowance, or wait until 00:00 UTC.`,
+          quota
+        };
+      }
+
+      // 4. Sliding 5-minute burst token window
+      if (windowStats.tokens + estimatedInputTokens > windowLimit) {
+        const windowResetMs = (windowStats.oldestTs || nowMs) + AI_TOKEN_CONFIG.windowMs;
+        const retryAfterSeconds = Math.max(15, Math.ceil((windowResetMs - nowMs) / 1000));
+        return {
+          allowed: false,
+          scope: actor.type === "guest" ? "guest_window" : "user_window",
+          retryAfterSeconds,
+          resetAt: new Date(windowResetMs).toISOString(),
+          error: actor.type === "guest"
+            ? `You've reached the short-term guest AI token pace limit. Sign in for higher limits or wait ${retryAfterSeconds}s.`
+            : `You're practicing super fast! Please pause for ${retryAfterSeconds}s so your 5-minute AI token pace window can refresh.`,
+          quota
+        };
+      }
+
+      // 5. Actor daily token budget
+      if (actorDaily.tokens + estimatedInputTokens > dailyLimit) {
+        const retryAfterSeconds = Math.max(60, Math.ceil((nextDayResetMs - nowMs) / 1000));
+        return {
+          allowed: false,
+          scope: actor.type === "guest" ? "guest_daily" : "user_daily",
+          retryAfterSeconds,
+          resetAt: new Date(nextDayResetMs).toISOString(),
+          error: actor.type === "guest"
+            ? `Guest daily AI token allowance (${dailyLimit.toLocaleString()} tokens) reached. Sign in for ${AI_TOKEN_CONFIG.userDailyTokens.toLocaleString()} daily tokens, or try again after 00:00 UTC.`
+            : `You have reached your generous daily AI allowance (${dailyLimit.toLocaleString()} tokens). Your quota resets automatically at 00:00 UTC.`,
+          quota
+        };
+      }
+
+      // 6. Actor monthly token budget
+      if (actorMonthly.tokens + estimatedInputTokens > monthlyLimit) {
+        const retryAfterSeconds = Math.max(300, Math.ceil((nextMonthResetMs - nowMs) / 1000));
+        return {
+          allowed: false,
+          scope: actor.type === "guest" ? "guest_monthly" : "user_monthly",
+          retryAfterSeconds,
+          resetAt: new Date(nextMonthResetMs).toISOString(),
+          error: actor.type === "guest"
+            ? `Guest monthly AI allowance reached. Please sign in to continue practicing.`
+            : `You have reached your monthly AI token allowance (${monthlyLimit.toLocaleString()} tokens). Your allowance resets on the 1st of next month at 00:00 UTC.`,
+          quota
+        };
+      }
+
+      return { allowed: true, quota };
+    }
+
+    public recordActualUsage(actor: TokenActor, actualTokens: number): void {
+      const safeTokens = Math.max(1, Math.floor(actualTokens));
+      const now = new Date();
+      const dayKey = this.getUtcDayKey(now);
+      const monthKey = this.getUtcMonthKey(now);
+
+      this.recordWindowUsage(actor.actorId, safeTokens, now.getTime());
+      this.incrementCounter(`${actor.actorId}_day_${dayKey}`, safeTokens, 1, "day", actor.type);
+      this.incrementCounter(`${actor.actorId}_month_${monthKey}`, safeTokens, 1, "month", actor.type);
+      this.incrementCounter(`global_day_${dayKey}`, safeTokens, 1, "day", "global");
+      this.incrementCounter(`global_month_${monthKey}`, safeTokens, 1, "month", "global");
+    }
+
+    public pruneStaleCache(): void {
+      const now = new Date();
+      const activeDay = this.getUtcDayKey(now);
+      const activeMonth = this.getUtcMonthKey(now);
+      for (const key of this.counterCache.keys()) {
+        if (key.includes("_day_") && !key.endsWith(`_${activeDay}`)) {
+          this.counterCache.delete(key);
+        } else if (key.includes("_month_") && !key.endsWith(`_${activeMonth}`)) {
+          this.counterCache.delete(key);
+        }
+      }
+      const cutoff = now.getTime() - AI_TOKEN_CONFIG.windowMs;
+      for (const [k, entries] of this.slidingWindowMap.entries()) {
+        const active = entries.filter(e => e.ts > cutoff);
+        if (active.length === 0) this.slidingWindowMap.delete(k);
+        else this.slidingWindowMap.set(k, active);
+      }
+    }
+  }
+
+  const aiTokenBudgetManager = new AiTokenBudgetManager();
+  setInterval(() => aiTokenBudgetManager.pruneStaleCache(), 10 * 60 * 1000);
+
+  function getClientIp(req: express.Request): string {
+    return req.ip || (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || "unknown_ip";
+  }
+
+  function sendTokenQuotaExceeded(res: express.Response, check: BudgetCheckResult) {
+    const retryAfter = check.retryAfterSeconds || 60;
+    res.setHeader("Retry-After", String(retryAfter));
+    return res.status(429).json({
+      error: check.error || "AI token quota limit reached. Please try again shortly.",
+      code: "TOKEN_QUOTA_EXCEEDED",
+      scope: check.scope || "user_daily",
+      retryAfter,
+      resetAt: check.resetAt || check.quota.dailyResetAt,
+      quota: check.quota,
+      status: 429
+    });
+  }
+
+  // Quota Inspection Endpoint (returns remaining daily/monthly allowance for current user or guest)
+  app.get("/api/ai/quota", standardApiLimiter, async (req, res) => {
+    try {
+      const clientIp = getClientIp(req);
+      const authUser = req.headers.authorization ? await verifyAuthUser(req) : null;
+      const actor = aiTokenBudgetManager.buildActor(authUser, clientIp);
+      const quota = await aiTokenBudgetManager.getQuotaSnapshot(actor);
+      return res.json({
+        actorType: actor.type,
+        quota
+      });
+    } catch (err: any) {
+      console.error("[AI Quota Status Error]:", err?.message || err);
+      return res.status(500).json({ error: "Unable to retrieve AI quota status." });
+    }
+  });
+
+  // =========================================================================
   // STAGE C: BATCHED DIFFICULT VOCABULARY RESOLUTION ENDPOINT
   // =========================================================================
-  app.post("/api/ai/vocab-batch", async (req, res) => {
+  app.post("/api/ai/vocab-batch", aiEndpointLimiter, async (req, res) => {
     try {
       const { languageCode, nativeLanguage, level, items } = req.body || {};
       if (!Array.isArray(items) || items.length === 0) {
@@ -1564,6 +2147,11 @@ async function startServer() {
         console.warn("[Vocab-Batch] Circuit breaker active. Returning empty batch to allow client local fallbacks.");
         return res.json({ items: [], fallback: true });
       }
+
+      // Token budget enforcement (fail-soft to local dictionary fallback if quota reached)
+      const clientIp = getClientIp(req);
+      const authUser = req.headers.authorization ? await verifyAuthUser(req) : null;
+      const actor = aiTokenBudgetManager.buildActor(authUser, clientIp);
 
       const client = getAiClient();
       const candidateModels = getCandidateModelChain();
@@ -1600,15 +2188,26 @@ Respond strictly with valid JSON adhering to this schema:
   ]
 }`;
 
+      const estimatedInputTokens = aiTokenBudgetManager.estimatePayloadTokens(prompt);
+      const budgetCheck = await aiTokenBudgetManager.checkBudget(actor, estimatedInputTokens);
+      if (!budgetCheck.allowed) {
+        console.warn(`[Vocab-Batch] Token budget reached (${budgetCheck.scope}); falling back gracefully to local dictionary.`);
+        return res.json({ items: [], fallback: true, quotaExceeded: true });
+      }
+
+      const safeVocabConfig = aiTokenBudgetManager.clampOutputConfig(
+        { responseMimeType: "application/json" },
+        actor,
+        false
+      );
+
       let aiResponse: any = null;
       for (const currentModel of candidateModels) {
         try {
           aiResponse = await client.models.generateContent({
             model: currentModel,
             contents: prompt,
-            config: {
-              responseMimeType: "application/json"
-            }
+            config: safeVocabConfig
           });
           if (aiResponse && aiResponse.text) {
             geminiCircuitBreaker.recordSuccess();
@@ -1633,6 +2232,13 @@ Respond strictly with valid JSON adhering to this schema:
       }
 
       if (aiResponse && aiResponse.text) {
+        const usage = aiTokenBudgetManager.extractActualTokenUsage(
+          aiResponse.usageMetadata,
+          estimatedInputTokens,
+          aiResponse.text
+        );
+        aiTokenBudgetManager.recordActualUsage(actor, usage.totalTokens);
+
         try {
           const parsed = JSON.parse(aiResponse.text.trim());
           if (parsed && Array.isArray(parsed.items)) {
@@ -1651,7 +2257,7 @@ Respond strictly with valid JSON adhering to this schema:
   });
 
   // Secure API Route to proxy Gemini API calls
-  app.post("/api/ai/generateContent", async (req, res) => {
+  app.post("/api/ai/generateContent", aiEndpointLimiter, async (req, res) => {
     const startTime = Date.now();
     let selectedModel = "unknown";
 
@@ -1713,20 +2319,44 @@ Respond strictly with valid JSON adhering to this schema:
         return res.status(400).json({ error: "Request payload size exceeds maximum safe prompt threshold." });
       }
 
+      // Strictly validate and bound optional client timeoutMs to prevent timer-based resource exhaustion
+      const MIN_CUSTOM_TIMEOUT_MS = 1000;
+      const MAX_CUSTOM_TIMEOUT_MS = 300000; // 5-minute server-enforced ceiling
+      const DEFAULT_LONG_FORM_TIMEOUT_MS = 300000;
+      let safeCustomTimeoutMs: number | undefined;
+      if (customTimeoutMs !== undefined && customTimeoutMs !== null) {
+        const parsedTimeout = typeof customTimeoutMs === "number" ? customTimeoutMs : Number(customTimeoutMs);
+        if (!Number.isFinite(parsedTimeout) || parsedTimeout < MIN_CUSTOM_TIMEOUT_MS || parsedTimeout > MAX_CUSTOM_TIMEOUT_MS) {
+          return res.status(400).json({
+            error: `Invalid timeoutMs value. Must be a finite number between ${MIN_CUSTOM_TIMEOUT_MS} and ${MAX_CUSTOM_TIMEOUT_MS} milliseconds.`
+          });
+        }
+        safeCustomTimeoutMs = Math.trunc(parsedTimeout);
+      }
+
       // Determine if task is long-form generation (e.g. reading module passage, questions, exam modules)
       const isLongFormTask = Boolean(
         isLongForm ||
         req.body?.isLongForm ||
         req.body?.taskType ||
-        (customTimeoutMs && customTimeoutMs >= 60000)
+        (safeCustomTimeoutMs !== undefined && safeCustomTimeoutMs >= 60000)
       );
+
+      // 4b. Per-User / Guest / Global Token Budget Pre-Check & Output Token Clamping
+      const tokenActor = aiTokenBudgetManager.buildActor(authUser, clientIp);
+      const estimatedInputTokens = aiTokenBudgetManager.estimatePayloadTokens(contents, config);
+      const budgetCheck = await aiTokenBudgetManager.checkBudget(tokenActor, estimatedInputTokens);
+      if (!budgetCheck.allowed) {
+        return sendTokenQuotaExceeded(res, budgetCheck);
+      }
+      const boundedConfig = aiTokenBudgetManager.clampOutputConfig(config, tokenActor, isLongFormTask);
 
       // 5. Approved Candidate Models Chain in descending order down to 3.5 Flash floor
       const candidateModels = getCandidateModelChain(typeof model === "string" ? model : undefined);
       selectedModel = candidateModels[0];
 
       fs.appendFileSync("/tmp/proxy.log", `[${new Date().toISOString()}] Start request. modelParam=${model}, isLongForm=${isLongFormTask}, Chain: [${candidateModels.join(", ")}]\n`);
-      console.log(`[Proxy] Initiating AI request. Primary: ${candidateModels[0]}, Chain: [${candidateModels.join(", ")}], isLongForm: ${isLongFormTask}, Payload: ${contentLen} chars`);
+      console.log(`[Proxy] Initiating AI request. Primary: ${candidateModels[0]}, Chain: [${candidateModels.join(", ")}], isLongForm: ${isLongFormTask}, Payload: ${contentLen} chars (~${estimatedInputTokens} tokens)`);
 
       const client = getAiClient();
       let response: any = null;
@@ -1743,28 +2373,36 @@ Respond strictly with valid JSON adhering to this schema:
         const isLastModel = currentModel === candidateModels[candidateModels.length - 1];
         const isFloorModel = currentModel === "gemini-3.5-flash";
 
-        // Per-model 5-minute (300,000ms) timer for long-form generation tasks (reading modules).
+        // Per-model bounded timer (max 5 minutes / 300,000ms) for long-form generation tasks (reading modules).
         // Each model receives a brand-new timer from the moment it begins working.
         // For interactive chat doubts, preserve the fast failover window (3.0s probe, 10s floor).
-        const timeoutMs = isLongFormTask
-          ? (customTimeoutMs || 300000)
+        const rawTimeoutMs = isLongFormTask
+          ? (safeCustomTimeoutMs ?? DEFAULT_LONG_FORM_TIMEOUT_MS)
           : (isLastModel || isFloorModel ? 10000 : 3000);
+        const timeoutMs = Math.min(MAX_CUSTOM_TIMEOUT_MS, Math.max(MIN_CUSTOM_TIMEOUT_MS, rawTimeoutMs));
         const modelStart = Date.now();
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
         try {
           fs.appendFileSync("/tmp/proxy.log", `[${new Date().toISOString()}] Trying model: ${currentModel} (timeout: ${timeoutMs}ms, fresh timer start)...\n`);
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Timeout: Model ${currentModel} execution exceeded ${timeoutMs}ms window`)), timeoutMs)
-          );
+          const timeoutPromise = new Promise((_, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error(`Timeout: Model ${currentModel} execution exceeded ${timeoutMs}ms window`)), timeoutMs);
+          });
 
-          response = await Promise.race([
-            executeWithNetworkRetries(() => client.models.generateContent({
-              model: currentModel,
-              contents,
-              config
-            }), 1, 300),
-            timeoutPromise
-          ]);
+          try {
+            response = await Promise.race([
+              executeWithNetworkRetries(() => client.models.generateContent({
+                model: currentModel,
+                contents,
+                config: boundedConfig
+              }), 1, 300),
+              timeoutPromise
+            ]);
+          } finally {
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+            }
+          }
 
           if (response) {
             const elapsed = Date.now() - startTime;
@@ -1873,8 +2511,22 @@ Respond strictly with valid JSON adhering to this schema:
         });
       }
 
+      // 6. Accurate Post-Completion Token Deduction from Gemini usageMetadata
+      const responseText = response.text || "";
+      const tokenUsage = aiTokenBudgetManager.extractActualTokenUsage(
+        response.usageMetadata,
+        estimatedInputTokens,
+        responseText
+      );
+      aiTokenBudgetManager.recordActualUsage(tokenActor, tokenUsage.totalTokens);
+
+      const updatedDailyRemaining = Math.max(0, budgetCheck.quota.dailyRemaining - tokenUsage.totalTokens);
+      res.setHeader("X-AI-Tokens-Used", String(tokenUsage.totalTokens));
+      res.setHeader("X-AI-Daily-Remaining", String(updatedDailyRemaining));
+      res.setHeader("X-AI-Daily-Reset", budgetCheck.quota.dailyResetAt);
+
       return res.json({
-        text: response.text || "",
+        text: responseText,
       });
     } catch (error: any) {
       if (is429QuotaError(error)) {
@@ -1897,7 +2549,7 @@ Respond strictly with valid JSON adhering to this schema:
   });
 
   // Secure API Route to proxy Gemini stream calls
-  app.post("/api/ai/generateContentStream", async (req, res) => {
+  app.post("/api/ai/generateContentStream", aiEndpointLimiter, async (req, res) => {
     try {
       // 1. IP Rate Limiting
       const clientIp = (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() || req.ip || "unknown_ip";
@@ -1950,6 +2602,20 @@ Respond strictly with valid JSON adhering to this schema:
         return res.status(400).json({ error: "Invalid contents structure in request body." });
       }
 
+      const contentLen = typeof contents === "string" ? contents.length : JSON.stringify(contents).length;
+      if (contentLen > 500000) {
+        return res.status(400).json({ error: "Request payload size exceeds maximum safe prompt threshold." });
+      }
+
+      // 4b. Per-User / Guest / Global Token Budget Pre-Check & Output Token Clamping
+      const tokenActor = aiTokenBudgetManager.buildActor(authUser, clientIp);
+      const estimatedInputTokens = aiTokenBudgetManager.estimatePayloadTokens(contents, config);
+      const budgetCheck = await aiTokenBudgetManager.checkBudget(tokenActor, estimatedInputTokens);
+      if (!budgetCheck.allowed) {
+        return sendTokenQuotaExceeded(res, budgetCheck);
+      }
+      const boundedConfig = aiTokenBudgetManager.clampOutputConfig(config, tokenActor, false);
+
       const candidateModels = getCandidateModelChain(typeof model === "string" ? model : undefined);
       const client = getAiClient();
       let responseStream: any = null;
@@ -1964,20 +2630,27 @@ Respond strictly with valid JSON adhering to this schema:
         const isFloorModel = currentModel === "gemini-3.5-flash";
         const timeoutMs = (isLastModel || isFloorModel) ? 10000 : 3000;
         const modelStart = Date.now();
+        let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
 
         try {
-          const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Timeout: Model ${currentModel} stream probe exceeded ${timeoutMs}ms`)), timeoutMs)
-          );
+          const timeoutPromise = new Promise((_, reject) => {
+            timeoutHandle = setTimeout(() => reject(new Error(`Timeout: Model ${currentModel} stream probe exceeded ${timeoutMs}ms`)), timeoutMs);
+          });
 
-          responseStream = await Promise.race([
-            executeWithNetworkRetries(() => client.models.generateContentStream({
-              model: currentModel,
-              contents,
-              config
-            }), 1, 300),
-            timeoutPromise
-          ]);
+          try {
+            responseStream = await Promise.race([
+              executeWithNetworkRetries(() => client.models.generateContentStream({
+                model: currentModel,
+                contents,
+                config: boundedConfig
+              }), 1, 300),
+              timeoutPromise
+            ]);
+          } finally {
+            if (timeoutHandle) {
+              clearTimeout(timeoutHandle);
+            }
+          }
 
           if (responseStream) {
             modelReachabilityRegistry.recordSuccess(currentModel, Date.now() - modelStart);
@@ -2053,14 +2726,39 @@ Respond strictly with valid JSON adhering to this schema:
       res.setHeader("Cache-Control", "no-cache");
       res.setHeader("Connection", "keep-alive");
 
-      for await (const chunk of responseStream) {
-        const text = chunk.text || "";
-        res.write(`data: ${JSON.stringify({ text })}\n\n`);
+      let accumulatedOutputText = "";
+      let finalUsageMetadata: any = null;
+      try {
+        for await (const chunk of responseStream) {
+          const text = chunk.text || "";
+          if (text) {
+            accumulatedOutputText += text;
+          }
+          if (chunk.usageMetadata) {
+            finalUsageMetadata = chunk.usageMetadata;
+          }
+          res.write(`data: ${JSON.stringify({ text })}\n\n`);
+        }
+        res.write("data: [DONE]\n\n");
+        res.end();
+      } finally {
+        // Deduct actual tokens consumed even if the client disconnects mid-stream
+        const streamUsage = aiTokenBudgetManager.extractActualTokenUsage(
+          finalUsageMetadata,
+          estimatedInputTokens,
+          accumulatedOutputText
+        );
+        aiTokenBudgetManager.recordActualUsage(tokenActor, streamUsage.totalTokens);
       }
-      res.write("data: [DONE]\n\n");
-      res.end();
     } catch (error: any) {
       console.error("[Server] Error in generateContentStream proxy:", error?.message || "Operation failed");
+      if (!res.headersSent) {
+        return res.status(error?.status || 500).json({
+          error: error?.message || "An error occurred during streaming content generation.",
+          code: error?.code || "STREAM_ERROR",
+          status: error?.status || 500
+        });
+      }
       res.write(`data: ${JSON.stringify({ error: error.message || "An error occurred during streaming content generation." })}\n\n`);
       res.end();
     }
@@ -2111,7 +2809,7 @@ Respond strictly with valid JSON adhering to this schema:
       immutable: true,
       index: false
     }));
-    app.get('*', (req, res) => {
+    app.get('*', spaStaticLimiter, (req, res) => {
       res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
       res.sendFile(path.join(distPath, 'index.html'));
     });

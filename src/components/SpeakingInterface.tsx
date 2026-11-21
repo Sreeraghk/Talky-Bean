@@ -40,6 +40,35 @@ import { COMMON_ROLE_PLAY_SCENARIOS } from '../data/commonScenarios';
 
 const translationCache: Record<string, string> = {};
 
+/**
+ * Strips SSML / HTML tag-like sequences (including nested or unclosed streaming tags)
+ * using a deterministic character scanner so crafted inputs cannot leave behind partial tags
+ * or angle brackets while preserving normal spoken text and punctuation.
+ */
+function stripMarkupTags(input: string): string {
+  if (!input) return '';
+  let result = '';
+  let tagDepth = 0;
+
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === '<') {
+      tagDepth++;
+    } else if (ch === '>') {
+      if (tagDepth > 0) {
+        tagDepth--;
+      }
+    } else if (ch === '\n' && tagDepth > 0) {
+      tagDepth = 0;
+      result += ch;
+    } else if (tagDepth === 0) {
+      result += ch;
+    }
+  }
+
+  return result.trim();
+}
+
 const getConnectingTheme = (scenarioId: string, title: string) => {
   const text = `${scenarioId} ${title}`.toLowerCase();
   if (text.includes('café') || text.includes('cafe') || text.includes('coffee') || text.includes('barista') || text.includes('restaurant')) {
@@ -771,7 +800,7 @@ export function SpeakingInterface({
         let rawStudyNotes = parts[1] ? parts[1].trim() : "";
         
         // Strip SSML tags like <break time="300ms"/> for BOTH display and speech
-        const cleanSpoken = spokenText.replace(/<[^>]*>?/gm, '').trim();
+        const cleanSpoken = stripMarkupTags(spokenText);
         
         let studyNotes = "";
         
@@ -902,7 +931,7 @@ export function SpeakingInterface({
       });
         }
       } else {
-        const cleanText = text.replace(/<[^>]*>?/gm, '').trim();
+        const cleanText = stripMarkupTags(text);
         if (!cleanText && !isFinal) return; // Don't add a message bubble for empty interim updates
         
         setMessages(prev => {

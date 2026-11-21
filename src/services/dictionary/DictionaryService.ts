@@ -37,9 +37,19 @@ export class DictionaryService {
       try {
         const stored = localStorage.getItem(`${VOCAB_CACHE_KEY}_${key}`);
         if (stored) {
-          const parsed = JSON.parse(stored) as VocabularyHintItem;
-          this.localMemoryCache.set(key, parsed);
-          return parsed;
+          const raw = JSON.parse(stored) as Partial<VocabularyHintItem>;
+          if (raw && typeof raw.originalWord === 'string' && typeof raw.translation === 'string') {
+            const hydrated: VocabularyHintItem = {
+              originalWord: raw.originalWord,
+              lemma: typeof raw.lemma === 'string' ? raw.lemma : raw.originalWord,
+              translation: raw.translation,
+              pos: typeof raw.pos === 'string' ? raw.pos : 'word',
+              explanation: typeof raw.explanation === 'string' ? raw.explanation : undefined,
+              source: raw.source === 'ai_contextual' ? 'ai_contextual' : 'dictionary'
+            };
+            this.localMemoryCache.set(key, hydrated);
+            return hydrated;
+          }
         }
       } catch {
         // Ignore storage read errors
@@ -50,6 +60,8 @@ export class DictionaryService {
 
   /**
    * Persists vocabulary item into memory and localStorage.
+   * Writes an explicit allowlisted subset (omitting grammatical `gender`) to persistent
+   * storage while retaining the full hint object in the volatile in-memory cache.
    */
   static setCachedHint(lang: string, word: string, hint: VocabularyHintItem) {
     const key = this.getCacheKey(lang, word);
@@ -57,7 +69,15 @@ export class DictionaryService {
 
     if (typeof localStorage !== 'undefined') {
       try {
-        localStorage.setItem(`${VOCAB_CACHE_KEY}_${key}`, JSON.stringify(hint));
+        const persistedHint: Omit<VocabularyHintItem, 'gender'> = {
+          originalWord: hint.originalWord,
+          lemma: hint.lemma,
+          translation: hint.translation,
+          pos: hint.pos,
+          explanation: hint.explanation,
+          source: hint.source
+        };
+        localStorage.setItem(`${VOCAB_CACHE_KEY}_${key}`, JSON.stringify(persistedHint));
       } catch {
         // Ignore storage write quota exceptions
       }

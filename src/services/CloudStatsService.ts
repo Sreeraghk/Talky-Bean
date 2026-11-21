@@ -16,6 +16,19 @@ import {
 import { SubscriptionService } from './SubscriptionService';
 import firebaseConfig from '../../firebase-applet-config.json';
 
+function generateSecureSessionId(): string {
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+  if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+    return cryptoObj.randomUUID();
+  }
+  if (cryptoObj && typeof cryptoObj.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    cryptoObj.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  throw new Error('Cryptographically secure random generator is unavailable in this runtime.');
+}
+
 export class CloudStatsService {
   private static db: any = null;
   private static auth: any = null;
@@ -23,7 +36,7 @@ export class CloudStatsService {
   private static currentUser: User | null = null;
   private static authListeners = new Set<(user: User | null) => void>();
   private static initialized = false;
-  private static sessionId = Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15);
+  private static sessionId = generateSecureSessionId();
   private static onLoggedOutElsewhere: (() => void) | null = null;
   private static unsubscribeSession: (() => void) | null = null;
   private static unsubscribeUserDoc: (() => void) | null = null;
@@ -440,7 +453,7 @@ export class CloudStatsService {
       // Save file metadata in user's files subcollection in Firestore
       if (this.currentUser && this.db && uid !== 'anonymous') {
         try {
-          const fileId = `${timestamp}_${Math.random().toString(36).substring(2, 7)}`;
+          const fileId = `${timestamp}_${generateSecureSessionId().slice(0, 8)}`;
           const userFileRef = doc(this.db, 'users', uid, 'files', fileId);
           await setDoc(userFileRef, {
             id: fileId,
