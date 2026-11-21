@@ -23,17 +23,9 @@ service cloud.firestore {
       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_:\\-\\+\\.\\s]+$');
     }
 
-    // OTP Token requests
+    // OTP Token requests — strictly server-only (Admin SDK bypasses rules). Never client-readable or client-writable.
     match /otp_requests/{email} {
-      allow get: if true;
-      allow create, update, delete: if (
-        request.resource == null || (
-          request.resource.data.code is string && 
-          request.resource.data.code.size() == 6 &&
-          request.resource.data.email == email &&
-          request.resource.data.expiresAt is int
-        )
-      );
+      allow read, write: if false;
     }
 
     // Developer whitelist system for free access and token caps
@@ -56,17 +48,35 @@ service cloud.firestore {
 
     // Hardware verification system to block multiple free trials
     match /used_device_trials/{deviceId} {
-      allow get: if isValidId(deviceId) || isAdmin();
+      allow get: if isAdmin() || (
+        isSignedIn() &&
+        isValidId(deviceId) &&
+        (resource == null || resource.data.userId == request.auth.uid || resource.data.userId == 'anonymous')
+      );
       allow list: if isAdmin();
-      allow create, update: if (
+      allow create: if isAdmin() || (
+        isSignedIn() &&
         isValidId(deviceId) &&
         request.resource.data.deviceId == deviceId &&
+        request.resource.data.userId == request.auth.uid &&
         request.resource.data.activatedAt is int &&
         request.resource.data.expiresAt is int &&
-        request.resource.data.userId is string &&
+        request.resource.data.expiresAt > request.resource.data.activatedAt &&
+        request.resource.data.expiresAt <= request.resource.data.activatedAt + 1209660000 &&
         request.resource.data.userEmail is string &&
         request.resource.data.platform is string
-      ) || isAdmin();
+      );
+      // Allow binding an existing 'anonymous' device trial once to the signed-in user without altering dates
+      allow update: if isAdmin() || (
+        isSignedIn() &&
+        isValidId(deviceId) &&
+        resource.data.userId == 'anonymous' &&
+        request.resource.data.userId == request.auth.uid &&
+        request.resource.data.deviceId == resource.data.deviceId &&
+        request.resource.data.activatedAt == resource.data.activatedAt &&
+        request.resource.data.expiresAt == resource.data.expiresAt
+      );
+      allow delete: if isAdmin();
     }
 
     // User collection path - Regular users locked down strictly to their own UID
@@ -76,28 +86,39 @@ service cloud.firestore {
         return isSignedIn() && request.auth.uid == userId;
       }
 
-      // Helper function checking if client write attempts to touch restricted subscription / entitlement / role keys
+      // Restricted keys that only the server (Admin SDK) or Admin may write
+      function hasRestrictedCreateKeys() {
+        return request.resource.data.keys().hasAny([
+          'subscription', 'subscriptionStatus', 'subscriptionPlatform',
+          'isPro', 'isProMember', 'isAdmin', 'plan', 'tokens', 'role', 'isDev',
+          'devWhitelisted', 'billing', 'dodoCustomerId', 'dodoSubscriptionId',
+          'stripeCustomerId', 'revenueCatAppUserId', 'entitlement', 'entitlements',
+          'paymentStatus', 'tier', 'proExpiresAt', 'proSince', 'lastPaymentAt'
+        ]);
+      }
+
       function touchesRestrictedKeys() {
         return request.resource.data.diff(resource.data).affectedKeys().hasAny([
-          'subscription', 'isPro', 'plan', 'tokens', 'role', 'isDev', 
-          'devWhitelisted', 'billing', 'dodoCustomerId', 'dodoSubscriptionId', 
-          'entitlement', 'entitlements', 'paymentStatus', 'tier'
+          'subscription', 'subscriptionStatus', 'subscriptionPlatform',
+          'isPro', 'isProMember', 'isAdmin', 'plan', 'tokens', 'role', 'isDev',
+          'devWhitelisted', 'billing', 'dodoCustomerId', 'dodoSubscriptionId',
+          'stripeCustomerId', 'revenueCatAppUserId', 'entitlement', 'entitlements',
+          'paymentStatus', 'tier', 'proExpiresAt', 'proSince', 'lastPaymentAt'
         ]);
       }
 
       allow get, list, read: if isOwner() || isAdmin();
       
-      // On creation, client cannot set pro/paid state or privileged roles
-      allow create: if (isOwner() && (
-        !request.resource.data.keys().hasAny(['isPro', 'role', 'subscription', 'dodoSubscriptionId']) ||
-        (request.resource.data.get('isPro', false) == false && request.resource.data.get('role', 'user') == 'user')
-      )) || isAdmin();
+      // On creation, client cannot set pro/paid state, subscription metadata, or privileged roles
+      allow create: if (isOwner() && !hasRestrictedCreateKeys()) || isAdmin();
 
       // On update, client is forbidden from altering entitlement or subscription keys
       allow update: if (isOwner() && !touchesRestrictedKeys()) || isAdmin();
       allow delete: if isAdmin();
 
       // Subscription subcollections - strictly SERVER / ADMIN WRITE ONLY. Clients can only READ their subscription status.
+      // NOTE: Do NOT add a wildcard /{allChildren=**} allow-write rule under /users/{userId}, as Firestore OR-combines
+      // overlapping rules and a wildcard rule would bypass this admin-only write boundary.
       match /settings/subscription {
         allow read: if isOwner() || isAdmin();
         allow write: if isAdmin();
@@ -106,6 +127,13 @@ service cloud.firestore {
       match /subscriptions/{subId} {
         allow read: if isOwner() || isAdmin();
         allow write: if isAdmin();
+      }
+
+      // User profile settings (learning goals, level, target language)
+      match /settings/profile {
+        allow read: if isOwner() || isAdmin();
+        allow create, update: if isOwner() || isAdmin();
+        allow delete: if isAdmin();
       }
 
       // User voice speed and auto-mic delay preferences
@@ -123,12 +151,20 @@ service cloud.firestore {
           (!('speakingStyle' in request.resource.data) || request.resource.data.speakingStyle in ['Formal', 'Casual']) &&
           request.resource.data.updatedAt is number
         ) || isAdmin();
+        allow delete: if isAdmin();
       }
 
-      // Other child documents under user (e.g. stats, history, progress)
-      match /{allChildren=**} {
-        allow get, list, read: if isOwner() || isAdmin();
-        allow write: if (isOwner() && !touchesRestrictedKeys()) || isAdmin();
+      // User learning progress & fluency stats
+      match /stats/{statId} {
+        allow read: if isOwner() || isAdmin();
+        allow create, update: if (isOwner() && isValidId(statId)) || isAdmin();
+        allow delete: if isAdmin();
+      }
+
+      // User uploaded files metadata
+      match /files/{fileId} {
+        allow read: if isOwner() || isAdmin();
+        allow create, update, delete: if (isOwner() && isValidId(fileId)) || isAdmin();
       }
     }
 
@@ -144,14 +180,10 @@ service cloud.firestore {
       allow write: if isAdmin();
     }
 
-    // Customer Complaints & Support Tickets - User Isolated & Admin Full Access
+    // Customer Complaints & Support Tickets — User Read-Own; Writes Routed Through Authenticated Server API
     match /complaints/{ticketId} {
-      allow get: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
-      allow list: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
-      allow create: if (isSignedIn() && request.resource.data.userId == request.auth.uid) || isAdmin();
-      allow update: if (isSignedIn() && resource.data.userId == request.auth.uid && request.resource.data.userId == request.auth.uid) || isAdmin();
-      allow delete: if isAdmin();
+      allow get, list: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow create, update, delete: if isAdmin();
     }
   }
 }
-

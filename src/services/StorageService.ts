@@ -43,9 +43,9 @@ export const STORAGE_REGISTRY: Record<string, StorageEntryMetadata> = {
   auto_mic_delay: { category: 'device_preference', description: 'Delay before auto-activating mic', isAuthoritative: true },
   is_auto_mode: { category: 'device_preference', description: 'Auto-conversational speech loop toggle', isAuthoritative: true },
 
-  // 3. Authentication & session state
-  device_uuid: { category: 'auth_session', description: 'Hardware or browser device identifier', isAuthoritative: true },
-  session_id: { category: 'auth_session', description: 'Current active session identifier', isAuthoritative: true },
+  // 3. Non-secret device & session metadata (NEVER stores Firebase refresh tokens, ID tokens, or secrets)
+  device_uuid: { category: 'auth_session', description: 'Non-secret hardware or browser device identifier', isAuthoritative: true },
+  session_id: { category: 'auth_session', description: 'Non-secret active UI session identifier', isAuthoritative: true },
 
   // 4. Subscription / Entitlement state
   // CRITICAL ARCHITECTURE RULE: Non-authoritative optimistic UI cache.
@@ -180,9 +180,14 @@ export class StorageService {
   }
 
   /**
-   * Generic save with prefix and language scoping
+   * Generic save with prefix and language scoping.
+   * Security guard: refuses to write auth tokens, refresh tokens, or secrets into localStorage.
    */
   static save<T>(key: string, data: T, lang?: string): void {
+    if (/(refresh_?token|id_?token|access_?token|auth_?token|secret|password|credential)/i.test(key)) {
+      console.error(`[StorageService] Blocked attempt to persist sensitive key "${key}" in browser storage.`);
+      return;
+    }
     const finalKey = lang ? `${this.PREFIX}${lang}_${key}` : `${this.PREFIX}${key}`;
     try {
       this.driver.setItem(finalKey, JSON.stringify(data));

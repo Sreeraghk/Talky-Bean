@@ -144,13 +144,54 @@ async function startServer() {
     handler: createJsonLimitHandler("Too many AI requests from this IP address. Please wait a minute before trying again.", "AI_RATE_LIMITED")
   });
 
-  // HTTP Security Headers
+  // HTTP Security Headers (CSP, HSTS, X-XSS-Protection: 0, Clickjacking & MIME Sniffing Guards)
+  const isProdEnv = process.env.NODE_ENV === "production";
+  const frameAncestorsPolicy = process.env.CSP_FRAME_ANCESTORS
+    || (isProdEnv ? "'self'" : "'self' https://aistudio.google.com https://*.googleusercontent.com https://*.google.com");
+  const scriptSrcPolicy = isProdEnv
+    ? "'self' https://apis.google.com https://accounts.google.com https://appleid.cdn-apple.com https://*.dodopayments.com"
+    : "'self' 'unsafe-inline' 'unsafe-eval' https://apis.google.com https://accounts.google.com https://appleid.cdn-apple.com https://*.dodopayments.com";
+  const connectSrcPolicy = [
+    "'self'",
+    "https://*.googleapis.com",
+    "https://*.firebaseio.com",
+    "https://*.firebaseapp.com",
+    "https://identitytoolkit.googleapis.com",
+    "https://securetoken.googleapis.com",
+    "https://firestore.googleapis.com",
+    "https://firebasestorage.googleapis.com",
+    "https://*.dodopayments.com",
+    "https://api.revenuecat.com",
+    "wss://*.firebaseio.com",
+    ...(isProdEnv ? [] : ["ws:", "wss:"])
+  ].join(" ");
+  const cspHeaderValue = [
+    "default-src 'self'",
+    `script-src ${scriptSrcPolicy}`,
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+    "font-src 'self' data: https://fonts.gstatic.com",
+    "img-src 'self' data: blob: https://*.googleusercontent.com https://firebasestorage.googleapis.com https://storage.googleapis.com https://lh3.googleusercontent.com",
+    "media-src 'self' blob: data: https://firebasestorage.googleapis.com",
+    `connect-src ${connectSrcPolicy}`,
+    "frame-src 'self' https://*.firebaseapp.com https://accounts.google.com https://appleid.apple.com https://*.dodopayments.com https://checkout.dodopayments.com",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self' https://*.dodopayments.com https://checkout.dodopayments.com",
+    `frame-ancestors ${frameAncestorsPolicy}`
+  ].join("; ");
+
   app.use((req, res, next) => {
     res.setHeader("X-Content-Type-Options", "nosniff");
-    res.setHeader("X-Frame-Options", "SAMEORIGIN");
-    res.setHeader("X-XSS-Protection", "1; mode=block");
+    if (isProdEnv) {
+      res.setHeader("X-Frame-Options", "SAMEORIGIN");
+    }
+    res.setHeader("X-XSS-Protection", "0");
     res.setHeader("Referrer-Policy", "strict-origin-when-cross-origin");
     res.setHeader("Permissions-Policy", "camera=(), microphone=(self), geolocation=()");
+    res.setHeader("Content-Security-Policy", cspHeaderValue);
+    if (req.secure || req.headers["x-forwarded-proto"] === "https") {
+      res.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
     next();
   });
 
@@ -294,7 +335,7 @@ async function startServer() {
   let aiClient: GoogleGenAI | null = null;
   function getAiClient(): GoogleGenAI {
     if (!aiClient) {
-      const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY || process.env.VITE_GEMINI_API_KEY;
+      const key = process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY;
       if (!key) {
         console.warn("[Server] WARNING: Neither GEMINI_API_KEY nor GOOGLE_API_KEY is defined in environment.");
       }
@@ -427,26 +468,32 @@ async function startServer() {
 
       console.log(`[Dodo Webhook Received] Signature header present: ${!!signatureHeader}`);
 
-      // Mandatory Cryptographic Signature Validation
-      if (webhookSecret && webhookSecret !== "MISSING_SECRET" && !webhookSecret.includes("YOUR_")) {
-        const isValid = verifyDodoWebhookSignature(rawBody, signatureHeader, webhookSecret);
-        if (!isValid) {
-          console.warn("[SECURITY ALERT] Invalid or spoofed Dodo Payments webhook signature attempt rejected.");
-          
-          auditLogStore.push({
-            id: `aud_${Date.now()}_spoof_attempt`,
-            eventType: 'webhook.security_violation',
-            userId: 'unknown_attacker',
-            complianceCategory: 'EDTECH_SAAS_SUBSCRIPTION',
-            timestamp: Date.now(),
-            signatureVerified: false,
-            status: 'REJECTED_UNAUTHORIZED'
-          });
+      // Mandatory Cryptographic Signature Validation (STRICT FAIL-CLOSED — zero dev bypass)
+      if (
+        !webhookSecret ||
+        webhookSecret.trim() === "" ||
+        webhookSecret === "MISSING_SECRET" ||
+        webhookSecret.includes("YOUR_")
+      ) {
+        console.error("[SECURITY ALERT] Rejected Dodo Payments webhook: DODO_PAYMENTS_WEBHOOK_SECRET is missing or unconfigured.");
+        return res.status(401).json({ error: "Unauthorized: Webhook verification secret is not configured." });
+      }
 
-          return res.status(401).json({ error: "Unauthorized: Webhook signature verification failed." });
-        }
-      } else {
-        console.warn("[Dodo Webhook Warning]: DODO_PAYMENTS_WEBHOOK_SECRET not set in environment. Webhook signature checking is operating in dev fallback mode.");
+      const isValid = verifyDodoWebhookSignature(rawBody, signatureHeader, webhookSecret);
+      if (!isValid) {
+        console.warn("[SECURITY ALERT] Invalid or spoofed Dodo Payments webhook signature attempt rejected.");
+        
+        auditLogStore.push({
+          id: `aud_${Date.now()}_spoof_attempt`,
+          eventType: 'webhook.security_violation',
+          userId: 'unknown_attacker',
+          complianceCategory: 'EDTECH_SAAS_SUBSCRIPTION',
+          timestamp: Date.now(),
+          signatureVerified: false,
+          status: 'REJECTED_UNAUTHORIZED'
+        });
+
+        return res.status(401).json({ error: "Unauthorized: Webhook signature verification failed." });
       }
 
       const event = req.body || {};

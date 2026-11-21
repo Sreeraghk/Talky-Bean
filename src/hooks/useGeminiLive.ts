@@ -71,7 +71,10 @@ export function useGeminiLive({
     setIsConnecting(true);
 
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+      // Security hardening: Gemini API keys must never be embedded in client bundles or WebSocket URLs.
+      // Any future Gemini Live integration must request a short-lived ephemeral token from an authenticated backend route.
+      throw new Error("Direct client-side Gemini Live connections are disabled for security. Use the authenticated backend proxy or ephemeral token endpoint.");
+      const ai = null as unknown as GoogleGenAI;
       
       const session = await ai.live.connect({
         model: "gemini-3.1-flash-live-preview",

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
+import { generateSecureId } from '../utils/idGenerator';
 import { 
   Mic, 
   MicOff, 
@@ -790,7 +791,7 @@ export function SpeakingInterface({
       
       let messageId = currentAiMessageIdRef.current;
       if (!messageId) {
-        messageId = Math.random().toString(36).substr(2, 9);
+        messageId = generateSecureId();
         currentAiMessageIdRef.current = messageId;
       }
       
@@ -992,7 +993,7 @@ export function SpeakingInterface({
       }
     } else {
       setMessages(prev => [...prev, { 
-        id: Math.random().toString(36).substr(2, 9), 
+        id: generateSecureId(), 
         text, 
         sender: 'user', 
         timestamp: Date.now() 
@@ -1002,7 +1003,7 @@ export function SpeakingInterface({
 
   const handleNewWordLearned = useCallback((word: string, translation: string) => {
     onNewWord({
-      id: Math.random().toString(36).substr(2, 9),
+      id: generateSecureId(),
       word,
       translation,
       learnedAt: Date.now()
@@ -1012,7 +1013,7 @@ export function SpeakingInterface({
   const handleGrammarTipReceived = useCallback((rule: string, explanation: string) => {
     pendingGrammarTipsRef.current.push(`${rule}: ${explanation}`);
     onNewGrammarTip({
-      id: Math.random().toString(36).substr(2, 9),
+      id: generateSecureId(),
       rule,
       explanation,
       learnedAt: Date.now()
@@ -1509,7 +1510,7 @@ export function SpeakingInterface({
                         e.stopPropagation();
                         setActiveTooltip({ word, translation: cachedTranslation!, x: e.clientX, y: e.clientY });
                         onNewWord({ 
-                          id: Math.random().toString(36).substr(2, 9), 
+                          id: generateSecureId(), 
                           word: cachedTranslation!, 
                           translation: word, 
                           learnedAt: Date.now() 

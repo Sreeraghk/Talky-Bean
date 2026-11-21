@@ -4,6 +4,7 @@ import { StorageService } from './StorageService';
 import { ApiService } from './ApiService';
 import { Device } from '@capacitor/device';
 import { doc, getDoc, setDoc } from 'firebase/firestore';
+import { generateSecureId } from '../utils/idGenerator';
 
 export interface SubscriptionState {
   isActive: boolean;
@@ -260,7 +261,7 @@ export class SubscriptionService {
     } catch (e) {
       let localId = localStorage.getItem('talkybean_fallback_device_uuid') || localStorage.getItem('langeasy_fallback_device_uuid');
       if (!localId) {
-        localId = 'web_' + Math.random().toString(36).substring(2, 11) + Date.now().toString(36);
+        localId = 'web_' + generateSecureId();
         localStorage.setItem('talkybean_fallback_device_uuid', localId);
       } else {
         localStorage.setItem('talkybean_fallback_device_uuid', localId);

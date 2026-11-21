@@ -54,17 +54,43 @@ export class UniversalAuthAdapter {
   }
 
   /**
+   * Generates a 256-bit cryptographically random nonce and its SHA-256 hex digest
+   * for Sign in with Apple OIDC replay protection.
+   */
+  private static async createAppleAuthNonce(): Promise<{ rawNonce: string; hashedNonce: string }> {
+    const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : undefined;
+    if (!cryptoObj || typeof cryptoObj.getRandomValues !== 'function' || !cryptoObj.subtle) {
+      throw new Error('Web Crypto API is required for secure Sign in with Apple nonce generation.');
+    }
+    const bytes = new Uint8Array(32);
+    cryptoObj.getRandomValues(bytes);
+    const rawNonce = Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    const digestBuffer = await cryptoObj.subtle.digest('SHA-256', new TextEncoder().encode(rawNonce));
+    const hashedNonce = Array.from(new Uint8Array(digestBuffer), (b) => b.toString(16).padStart(2, '0')).join('');
+    return { rawNonce, hashedNonce };
+  }
+
+  /**
    * Universal Sign in with Apple (Mandatory for App Store review if 3P social logins are offered)
    */
   static async signInWithApple(auth: Auth): Promise<User> {
     if (platformService.isIOS() || platformService.isNative()) {
       const globalWindow = window as any;
       if (globalWindow.SignInWithApple && typeof globalWindow.SignInWithApple.authorize === 'function') {
-        const appleRes = await globalWindow.SignInWithApple.authorize();
+        const { rawNonce, hashedNonce } = await this.createAppleAuthNonce();
+        const appleRes = await globalWindow.SignInWithApple.authorize({
+          scopes: 'email name',
+          nonce: hashedNonce
+        });
+        const idToken = appleRes?.response?.identityToken;
+        if (!idToken || typeof idToken !== 'string') {
+          throw new Error('Sign in with Apple returned an empty identity token.');
+        }
         const provider = new OAuthProvider('apple.com');
+        // Pass the original unhashed rawNonce so Firebase verifies SHA-256(rawNonce) === token.nonce
         const credential = provider.credential({
-          idToken: appleRes.response.identityToken,
-          rawNonce: appleRes.response.nonce
+          idToken,
+          rawNonce
         });
         const result = await signInWithCredential(auth, credential);
         return result.user;
